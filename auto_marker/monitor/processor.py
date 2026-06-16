@@ -1,21 +1,29 @@
 """
-流水线调度 — 从文件名解析元数据，依次执行：OCR → 比对 → 批注 → 打印 → 归档。
+流水线调度 — 从文件名解析元数据，依次执行：预处理 → OCR → 版面分析 → 比对 → 批注 → 打印 → 归档。
 """
 
+import io
 import re
 import shutil
 import logging
 from pathlib import Path
+
+import fitz
+import numpy as np
+from PIL import Image
 
 logger = logging.getLogger("processor")
 
 # 文件名契约: {班级}_{日期}_{序号}.pdf
 PATTERN = re.compile(r"(\w+)_(\d{4}-\d{2}-\d{2})_(\d+)\.pdf$")
 
+# 默认渲染 DPI（传递给 OCR）
+OCR_DPI = 200
+
 
 def load_answers(class_name: str, date_str: str) -> list[str]:
     """按班级/日期加载标准答案。
-    
+
     优先级:
         1. 数据库（Web UI 保存的答案）
         2. answers.txt 文件（手动编辑）
@@ -43,7 +51,7 @@ def load_answers(class_name: str, date_str: str) -> list[str]:
 
 
 def process_pdf(pdf_path: str) -> None:
-    """完整批改流水线。"""
+    """完整批改流水线：预处理 → OCR → 版面分析 → 比对 → 批注 → 打印 → 归档。"""
     path = Path(pdf_path)
     if not path.exists():
         logger.error("文件不存在: %s", pdf_path)
@@ -63,17 +71,61 @@ def process_pdf(pdf_path: str) -> None:
     answers = load_answers(class_name, date_str)
     logger.info("答案长度: %d 字", len(answers))
 
-    # 2. OCR
-    from core.ocr_engine import ocr_pdf
-    ocr_results = ocr_pdf(str(path))
-    if not ocr_results:
+    # ----------------------------------------------------------------
+    # 2. 四步流水线：渲染 → 预处理 → OCR → 版面分析
+    # ----------------------------------------------------------------
+    from core.image_processor import preprocess_image
+    from core.ocr_engine import ocr_image
+    from core.layout_analyzer import extract_student_answers
+
+    doc = fitz.open(str(path))
+    num_pages = len(doc)
+    logger.info("PDF 共 %d 页", num_pages)
+
+    all_ocr_results: list[dict] = []
+    page_img_sizes: list[tuple[int, int]] = []  # 每页 (w, h)
+
+    for page_idx in range(num_pages):
+        page = doc.load_page(page_idx)
+        zoom = OCR_DPI / 72
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+
+        # 转为 PIL Image
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        page_img_sizes.append((img.width, img.height))
+
+        # Step A: 图像预处理（去噪、二值化、增强、校正）
+        processed_img = preprocess_image(img)
+        logger.debug("第 %d 页: 预处理完成 (%dx%d)", page_idx + 1, img.width, img.height)
+
+        # Step B: OCR（对预处理后的图片进行文字识别）
+        img_np = np.array(processed_img)
+        page_results = ocr_image(img_np, page_idx)
+        all_ocr_results.extend(page_results)
+
+    doc.close()
+
+    if not all_ocr_results:
         logger.warning("OCR 无结果，放入 failed")
         _move_to(path, "failed")
         return
 
-    # 3. 比对
+    # Step C: 版面分析 → 提取学生手写答案
+    # 取最后一页的尺寸作为版面分析参考（单页用第一页也可）
+    ref_w, ref_h = page_img_sizes[0] if page_img_sizes else (0, 0)
+    student_answers = extract_student_answers(all_ocr_results, ref_w, ref_h)
+
+    if not student_answers:
+        logger.warning("未提取到学生手写答案，放入 failed")
+        _move_to(path, "failed")
+        return
+
+    # ----------------------------------------------------------------
+    # 3. 比对（使用提取后的答案）
+    # ----------------------------------------------------------------
     from core.grader import grade
-    graded = grade(ocr_results, answers)
+    graded = grade(student_answers, answers)
 
     # 4. 保存到数据库
     try:
