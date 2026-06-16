@@ -67,7 +67,7 @@ def grade(ocr_results: list[dict], answers: list[str],
     # 统计
     stats = {s: sum(1 for g in graded if g["status"] == s)
              for s in ("correct", "uncertain", "wrong")}
-    logger.info("比对结果: 正确 %(correct)d, 存疑 %(uncertain)d, 错误 %(wrong)d, 共 %d 字",
-                {**stats, "": len(graded)})
+    logger.info("比对结果: 正确 %(correct)d, 存疑 %(uncertain)d, 错误 %(wrong)d, 共 %(total)d 字",
+                {**stats, "total": len(graded)})
 
     return graded

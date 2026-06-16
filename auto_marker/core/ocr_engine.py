@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 import pdfplumber
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF — 无需 poppler，纯 Python
 
 logger = logging.getLogger("ocr")
 
@@ -52,18 +52,25 @@ def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
     logger.info("开始 OCR: %s (dpi=%d)", pdf_path, dpi)
     results = []
 
-    with pdfplumber.open(pdf_path) as pdf:
-        num_pages = len(pdf.pages)
-        logger.info("PDF 共 %d 页", num_pages)
+    # 使用 PyMuPDF 渲染 PDF 页面为图片（无需 poppler）
+    doc = fitz.open(pdf_path)
+    num_pages = len(doc)
+    logger.info("PDF 共 %d 页", num_pages)
 
-    # pdf2image 将 PDF 转为 PIL Image
-    images = convert_from_path(pdf_path, dpi=dpi)
-    if len(images) != num_pages:
-        logger.warning("PDF 页数 %d ≠ 图片数 %d", num_pages, len(images))
+    for page_idx in range(num_pages):
+        page = doc.load_page(page_idx)
 
-    for page_idx, img in enumerate(images):
-        img_w, img_h = img.size
-        logger.debug("第 %d 页: %dx%d 像素", page_idx + 1, img_w, img_h)
+        # 渲染页面为 RGB 图片
+        zoom = dpi / 72  # PDF 默认 72 DPI
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img_w, img_h = pix.width, pix.height
+        logger.debug("第 %d 页: %dx%d 像素 (dpi=%d)", page_idx + 1, img_w, img_h, dpi)
+
+        # 转为 PIL Image
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
 
         # 保存为临时文件供 EasyOCR 读取
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -94,6 +101,8 @@ def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
                 "img_pixel_w": img_w,
                 "img_pixel_h": img_h,
             })
+
+    doc.close()
 
     logger.info("OCR 完成: %d 个字符", len(results))
     return results

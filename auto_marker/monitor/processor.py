@@ -14,7 +14,24 @@ PATTERN = re.compile(r"(\w+)_(\d{4}-\d{2}-\d{2})_(\d+)\.pdf$")
 
 
 def load_answers(class_name: str, date_str: str) -> list[str]:
-    """按班级/日期加载标准答案。MVP 阶段从 answers.txt 读取。"""
+    """按班级/日期加载标准答案。
+    
+    优先级:
+        1. 数据库（Web UI 保存的答案）
+        2. answers.txt 文件（手动编辑）
+    """
+    # 1. 尝试从数据库读取（Web UI 保存的答案优先）
+    try:
+        from db.crud import get_answer
+        db_text = get_answer(class_name, date_str)
+        if db_text:
+            logger.info("从数据库加载答案（班级=%s, 日期=%s）: %d 字",
+                        class_name, date_str, len(db_text))
+            return list(db_text.replace("\n", "").replace(" ", ""))
+    except Exception as e:
+        logger.warning("数据库读取答案失败，回退到文件: %s", e)
+
+    # 2. 回退到 answers.txt 文件
     answers_file = Path(__file__).resolve().parent.parent / "answers.txt"
     if not answers_file.exists():
         logger.warning("answers.txt 不存在，使用空答案集")
@@ -22,7 +39,6 @@ def load_answers(class_name: str, date_str: str) -> list[str]:
     text = answers_file.read_text(encoding="utf-8").strip()
     if not text:
         return []
-    # 每行一个字或词
     return list(text.replace("\n", "").replace(" ", ""))
 
 
