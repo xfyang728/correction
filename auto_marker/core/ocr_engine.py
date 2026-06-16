@@ -1,12 +1,12 @@
 """
-OCR 引擎 — PaddleOCR 封装。
+OCR 引擎 — PaddleOCR 3.0 (PP-OCRv5) 封装。
 
-使用 ch_PP-OCRv4_server 高精度模型，提升手写汉字识别率。
-支持直接对 numpy array 推理（避免临时文件 IO），也支持 PDF 路径。
+使用 PP-OCRv5_server 高精度模型，支持手写体识别。
+PP-OCRv5 为整行识别，本模块负责拆分为单字并保留 bbox。
 """
 
 import logging
-from pathlib import Path
+import re
 
 import fitz  # PyMuPDF
 import numpy as np
@@ -19,27 +19,65 @@ logger = logging.getLogger("ocr")
 _ocr_instance = None
 
 
-def _get_ocr(use_gpu: bool = False):
-    """获取或初始化 PaddleOCR 实例（server 高精度模型）。"""
+def _get_ocr():
+    """获取或初始化 PaddleOCR 3.0 实例（PP-OCRv5 server）。"""
     global _ocr_instance
     if _ocr_instance is None:
-        logger.info("正在初始化 PaddleOCR（ch_PP-OCRv4_server，首次加载将下载模型）...")
+        logger.info("正在初始化 PaddleOCR 3.0（PP-OCRv5_server，首次加载将下载模型）...")
         try:
             from paddleocr import PaddleOCR
         except ImportError:
-            raise ImportError("请安装 paddleocr: pip install paddleocr")
+            raise ImportError("请安装 paddleocr: pip install paddleocr==3.0.0")
         _ocr_instance = PaddleOCR(
-            use_angle_cls=False,
-            lang='ch',
-            use_gpu=False,
-            show_log=False,
-            # server 高精度模型（自动下载 ch_PP-OCRv4_rec_server）
-            rec_algorithm='SVTR_LCNet',
-            rec_model_dir=None,
-            det_model_dir=None,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
         )
-        logger.info("PaddleOCR 就绪（server 模式）")
+        logger.info("PaddleOCR 3.0 就绪（PP-OCRv5 server）")
     return _ocr_instance
+
+
+def _is_chinese_char(ch: str) -> bool:
+    """判断是否为中文字符。"""
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF   # CJK 统一汉字
+        or 0x3400 <= code <= 0x4DBF  # CJK 扩展 A
+        or 0xF900 <= code <= 0xFAFF  # CJK 兼容汉字
+    )
+
+
+def _split_line_to_chars(text: str, line_box, confidence: float, page_idx: int,
+                         img_w: int, img_h: int) -> list[dict]:
+    """将整行识别结果拆分为单字，bbox 按等宽切分。
+
+    PP-OCRv5 返回整行文本（如"西湖莲叶"），需要拆成单字
+    并为每个字估算 bbox 坐标。
+    """
+    x0, y0, x2, y2 = line_box
+    line_w = x2 - x0
+    line_h = y2 - y0
+
+    # 提取所有中文字符
+    chars = [ch for ch in text if _is_chinese_char(ch)]
+    if not chars:
+        return []
+
+    # 按字符数等宽切分 bbox
+    char_w = line_w / len(chars)
+    results = []
+    for i, ch in enumerate(chars):
+        cx0 = int(x0 + i * char_w)
+        cx2 = int(x0 + (i + 1) * char_w)
+        results.append({
+            "page": page_idx,
+            "bbox_pixel": (cx0, int(y0), cx2, int(y2)),
+            "char": ch,
+            "confidence": confidence,
+            "img_pixel_w": img_w,
+            "img_pixel_h": img_h,
+        })
+    return results
 
 
 def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
@@ -56,8 +94,8 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
                 "bbox_pixel": (x0, y0, x2, y2),   # 像素坐标
                 "char": "好",
                 "confidence": 0.95,
-                "img_pixel_w": 1654,
-                "img_pixel_h": 2339,
+                "img_pixel_w": 2481,
+                "img_pixel_h": 3508,
             },
             ...
         ]
@@ -66,64 +104,43 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
     img_h, img_w = img.shape[:2]
     logger.debug("OCR 第 %d 页: %dx%d 像素", page_idx + 1, img_w, img_h)
 
-    # PaddleOCR 2.x 需要文件路径，保存临时文件
-    from PIL import Image as PILImage
-    pil_img = PILImage.fromarray(img)
-
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = tmp.name
-        pil_img.save(tmp_path, "PNG")
-
-    try:
-        # PaddleOCR 2.x 返回: [ [[x0,y0],[x1,y1],[x2,y2],[x3,y3]], (text, confidence) ]
-        raw = reader.ocr(tmp_path, cls=False)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    # PP-OCRv5 使用 predict() API，直接接受 numpy array
+    raw_results = reader.predict(input=img)
 
     results: list[dict] = []
-    if raw is None or len(raw) == 0:
-        logger.debug("第 %d 页无识别结果", page_idx + 1)
-        return results
+    for res in raw_results:
+        res_data = res.json.get("res", {})
+        rec_texts = res_data.get("rec_texts", [])
+        rec_scores = res_data.get("rec_scores", [])
+        rec_boxes = res_data.get("rec_boxes", [])  # [x0, y0, x1, y1]
 
-    # PaddleOCR 2.x 返回: [ page_results ]
-    # page_results = [ [[x0,y0],...], (text, confidence) ], ... ]
-    page_results = raw[0] if isinstance(raw[0], list) else raw
-    if page_results is None:
-        return results
+        for text, score, box in zip(rec_texts, rec_scores, rec_boxes):
+            text = text.strip()
+            if not text:
+                continue
 
-    for item in page_results:
-        poly, (text, confidence) = item
-        xs = [p[0] for p in poly]
-        ys = [p[1] for p in poly]
-        x0, y0 = min(xs), min(ys)
-        x2, y2 = max(xs), max(ys)
-
-        results.append({
-            "page": page_idx,
-            "bbox_pixel": (int(x0), int(y0), int(x2), int(y2)),
-            "char": text.strip(),
-            "confidence": confidence,
-            "img_pixel_w": img_w,
-            "img_pixel_h": img_h,
-        })
+            # 拆分整行为单字
+            char_results = _split_line_to_chars(
+                text, box, score, page_idx, img_w, img_h
+            )
+            results.extend(char_results)
 
     logger.debug("第 %d 页: 识别到 %d 个字符", page_idx + 1, len(results))
     return results
 
 
-def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
+def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 300) -> list[dict]:
     """对 PDF 逐页 OCR（保持原有接口，供其他模块调用）。
 
     参数:
         pdf_path: PDF 文件路径
-        use_gpu: 是否使用 GPU（默认 False）
-        dpi: 渲染 DPI（默认 200）
+        use_gpu: 是否使用 GPU（默认 False，PP-OCRv5 自动检测）
+        dpi: 渲染 DPI（默认 300）
 
     返回:
         与 ocr_image() 相同的结构
     """
-    _get_ocr(use_gpu)
+    _get_ocr()
 
     logger.info("开始 OCR: %s (dpi=%d)", pdf_path, dpi)
     results = []
