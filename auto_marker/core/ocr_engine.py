@@ -1,7 +1,7 @@
 """
 OCR 引擎 — PaddleOCR 封装。
 
-使用 ch_PP-OCRv4 轻量模型，专为中文手写体优化。
+使用 ch_PP-OCRv4_server 高精度模型，提升手写汉字识别率。
 支持直接对 numpy array 推理（避免临时文件 IO），也支持 PDF 路径。
 """
 
@@ -20,21 +20,25 @@ _ocr_instance = None
 
 
 def _get_ocr(use_gpu: bool = False):
-    """获取或初始化 PaddleOCR 实例。"""
+    """获取或初始化 PaddleOCR 实例（server 高精度模型）。"""
     global _ocr_instance
     if _ocr_instance is None:
-        logger.info("正在初始化 PaddleOCR（ch_PP-OCRv4，首次加载将下载模型）...")
+        logger.info("正在初始化 PaddleOCR（ch_PP-OCRv4_server，首次加载将下载模型）...")
         try:
             from paddleocr import PaddleOCR
         except ImportError:
             raise ImportError("请安装 paddleocr: pip install paddleocr")
         _ocr_instance = PaddleOCR(
-            use_angle_cls=False,  # 非弯曲文本，无需角度分类
+            use_angle_cls=False,
             lang='ch',
             use_gpu=False,
             show_log=False,
+            # server 高精度模型（自动下载 ch_PP-OCRv4_rec_server）
+            rec_algorithm='SVTR_LCNet',
+            rec_model_dir=None,
+            det_model_dir=None,
         )
-        logger.info("PaddleOCR 就绪")
+        logger.info("PaddleOCR 就绪（server 模式）")
     return _ocr_instance
 
 
