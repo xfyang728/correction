@@ -37,6 +37,20 @@ python ftp_server.py --port=21 --user=admin --passwd=123456 --dir=/srv/ftp
 | `--banner` | `Welcome...` | FTP 欢迎标语 |
 | `-v` / `--verbose` | — | 详细日志（DEBUG） |
 
+## 目录说明
+
+`--dir` 是 FTP 的根目录。客户端 `cd 文件夹名` 对应的是根目录下的子目录。
+
+例如要让客户端输入 `cd scan` 后进入 `D:\scan`：
+
+```bash
+python ftp_server.py --dir=D:\
+```
+
+此时根目录为 `D:\`，`scan` 是其子目录，客户端 `cd scan` 即 `D:\scan`。
+
+如果设置为 `--dir=D:\scan`，则根目录已是 `D:\scan`，客户端 `cd scan` 会寻找 `D:\scan\scan`。
+
 ## 兼容 Windows 资源管理器
 
 Windows 资源管理器的 FTP 客户端使用 `Everyone` 作为匿名登录用户名，本服务器已内置兼容，无需额外配置。
