@@ -92,13 +92,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
                     can.setLineWidth(2)
                     can.setFillColorRGB(1, 0.8, 0.2)
                     r2 = mark_r * 0.8
-                    can.beginPath()
-                    can.moveTo(x_page, y_page + r2)
-                    can.lineTo(x_page - r2, y_page - r2 * 0.6)
-                    can.lineTo(x_page + r2, y_page - r2 * 0.6)
-                    can.closePath()
-                    can.fill()
-                    can.stroke()
+                    p = can.beginPath()
+                    p.moveTo(x_page, y_page + r2)
+                    p.lineTo(x_page - r2, y_page - r2 * 0.6)
+                    p.lineTo(x_page + r2, y_page - r2 * 0.6)
+                    p.close()
+                    can.drawPath(p, fill=1, stroke=1)
 
                 else:  # correct
                     # 绿勾 — ✓ 形状：左上→中下→右上

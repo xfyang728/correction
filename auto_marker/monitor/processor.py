@@ -18,7 +18,7 @@ logger = logging.getLogger("processor")
 PATTERN = re.compile(r"(\w+)_(\d{4}-\d{2}-\d{2})_(\d+)\.pdf$")
 
 # 默认渲染 DPI（传递给 OCR）
-OCR_DPI = 200
+OCR_DPI = 300
 
 
 def load_answers(class_name: str, date_str: str) -> list[str]:

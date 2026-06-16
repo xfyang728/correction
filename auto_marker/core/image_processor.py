@@ -40,19 +40,12 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     # 1. 去噪 — 中值滤波
     denoised = cv2.medianBlur(gray, 3)
 
-    # 2. 二值化 — OTSU 自适应阈值
-    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # 3. 对比度增强 — CLAHE（对二值图效果有限，但对灰度图有效）
+    # 2. 对比度增强 — CLAHE（保留手写笔画浓淡信息，不做二值化）
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(denoised)
 
-    # 合并二值化与增强：取两者优势
-    # 对于清晰文本区域用二值化结果，对于过渡区域用增强结果
-    combined = cv2.addWeighted(binary, 0.6, enhanced, 0.4, 0)
-
-    # 4. 倾斜校正
-    deskewed = _deskew(combined)
+    # 3. 倾斜校正
+    deskewed = _deskew(enhanced)
 
     # 5. 质量筛查 — 模糊检测
     blur_score = cv2.Laplacian(deskewed, cv2.CV_64F).var()
