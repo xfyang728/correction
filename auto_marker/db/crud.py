@@ -115,3 +115,30 @@ def get_answer(class_name: str | None = None, date_str: str | None = None) -> st
         return ans.content if ans else None
     finally:
         session.close()
+
+
+def get_all_answers() -> list[Answer]:
+    """获取所有答案记录。"""
+    session = _get_session()
+    try:
+        return session.query(Answer).order_by(Answer.id.desc()).all()
+    finally:
+        session.close()
+
+
+def delete_answer(answer_id: int) -> bool:
+    """删除指定答案。"""
+    session = _get_session()
+    try:
+        ans = session.query(Answer).filter(Answer.id == answer_id).first()
+        if ans:
+            session.delete(ans)
+            session.commit()
+            return True
+        return False
+    except Exception as e:
+        session.rollback()
+        logger.error("删除答案失败: %s", e)
+        return False
+    finally:
+        session.close()
