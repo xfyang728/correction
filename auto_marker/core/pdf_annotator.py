@@ -45,14 +45,6 @@ def annotate(original_pdf: str, graded_results: list[dict],
         for page_num in range(len(pdf.pages)):
             page = pdf.pages[page_num]
 
-            # ---- 获取本页图片在页面上的实际位置 ----
-            img_info = None
-            img_page_w, img_page_h = page.width, page.height
-            if page.images:
-                img_info = page.images[0]
-                img_page_w = img_info["x1"] - img_info["x0"]
-                img_page_h = img_info["y1"] - img_info["y0"]
-
             # 收集本页批注
             page_results = [r for r in graded_results if r["page"] == page_num]
 
@@ -71,20 +63,16 @@ def annotate(original_pdf: str, graded_results: list[dict],
                 # bbox 宽高（用于标记大小自适应）
                 bw_pixel = bbox[2] - bbox[0]
                 bh_pixel = bbox[3] - bbox[1]
-                mark_radius = max(bw_pixel, bh_pixel) * 0.6  # 标记半径随字号缩放
+                mark_radius = max(bw_pixel, bh_pixel) * 0.6
 
                 # 像素坐标 → 页面点坐标
+                # OCR 渲染的是整页，直接按页面比例映射
                 ocr_img_w = r["img_pixel_w"]
                 ocr_img_h = r["img_pixel_h"]
-                if img_info:
-                    x_page = img_info["x0"] + (cx_pixel / ocr_img_w) * img_page_w
-                    y_page = (img_page_h - (cy_pixel / ocr_img_h) * img_page_h) + img_info["y0"]
-                else:
-                    # 无图片信息时直接按页比例换算
-                    x_page = cx_pixel / ocr_img_w * page.width
-                    y_page = page.height - (cy_pixel / ocr_img_h * page.height)
+                x_page = cx_pixel / ocr_img_w * page.width
+                y_page = page.height - (cy_pixel / ocr_img_h * page.height)
 
-                # 将标记半径也换算到页面坐标系
+                # 标记半径换算到页面坐标系
                 scale = page.width / ocr_img_w if ocr_img_w > 0 else 1
                 mark_r = mark_radius * scale
 
