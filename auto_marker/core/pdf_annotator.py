@@ -62,50 +62,67 @@ def annotate(original_pdf: str, graded_results: list[dict],
 
             for r in page_results:
                 bbox = r["bbox_pixel"]  # (x0, y0, x2, y2) 像素坐标
-                x_img, y_img = bbox[0], bbox[1]
                 status = r["status"]
                 conf = r["confidence"]
+
+                # 使用 bbox 中心点作为标记位置
+                cx_pixel = (bbox[0] + bbox[2]) / 2
+                cy_pixel = (bbox[1] + bbox[3]) / 2
+                # bbox 宽高（用于标记大小自适应）
+                bw_pixel = bbox[2] - bbox[0]
+                bh_pixel = bbox[3] - bbox[1]
+                mark_radius = max(bw_pixel, bh_pixel) * 0.6  # 标记半径随字号缩放
 
                 # 像素坐标 → 页面点坐标
                 ocr_img_w = r["img_pixel_w"]
                 ocr_img_h = r["img_pixel_h"]
                 if img_info:
-                    x_page = img_info["x0"] + (x_img / ocr_img_w) * img_page_w
-                    y_page = (img_page_h - (y_img / ocr_img_h) * img_page_h) + img_info["y0"]
+                    x_page = img_info["x0"] + (cx_pixel / ocr_img_w) * img_page_w
+                    y_page = (img_page_h - (cy_pixel / ocr_img_h) * img_page_h) + img_info["y0"]
                 else:
                     # 无图片信息时直接按页比例换算
-                    x_page = x_img / ocr_img_w * page.width
-                    y_page = page.height - (y_img / ocr_img_h * page.height)
+                    x_page = cx_pixel / ocr_img_w * page.width
+                    y_page = page.height - (cy_pixel / ocr_img_h * page.height)
+
+                # 将标记半径也换算到页面坐标系
+                scale = page.width / ocr_img_w if ocr_img_w > 0 else 1
+                mark_r = mark_radius * scale
 
                 # 根据状态绘制不同标记
                 if status == "wrong":
                     # 红圈
                     can.setStrokeColorRGB(1, 0, 0)
                     can.setLineWidth(2)
-                    can.circle(x_page, y_page, 10)
+                    can.circle(x_page, y_page, mark_r)
                     # 在圈旁标注置信度
                     can.setFont("Helvetica", 6)
-                    can.drawString(x_page + 12, y_page - 3, f"{conf:.0%}")
+                    can.drawString(x_page + mark_r + 2, y_page - 3, f"{conf:.0%}")
 
                 elif status == "uncertain":
                     # 橙三角
                     can.setStrokeColorRGB(1, 0.6, 0)
                     can.setLineWidth(2)
                     can.setFillColorRGB(1, 0.8, 0.2)
+                    r2 = mark_r * 0.8
                     can.beginPath()
-                    can.moveTo(x_page, y_page + 8)
-                    can.lineTo(x_page - 7, y_page - 6)
-                    can.lineTo(x_page + 7, y_page - 6)
+                    can.moveTo(x_page, y_page + r2)
+                    can.lineTo(x_page - r2, y_page - r2 * 0.6)
+                    can.lineTo(x_page + r2, y_page - r2 * 0.6)
                     can.closePath()
                     can.fill()
                     can.stroke()
 
                 else:  # correct
-                    # 绿勾
+                    # 绿勾 — ✓ 形状：左上→中下→右上
                     can.setStrokeColorRGB(0, 0.6, 0)
-                    can.setLineWidth(2)
-                    can.line(x_page - 6, y_page - 1, x_page - 2, y_page + 5)
-                    can.line(x_page - 2, y_page + 5, x_page + 7, y_page - 6)
+                    can.setLineWidth(2.5)
+                    r2 = mark_r * 0.7
+                    # 短线：从左上到中下
+                    can.line(x_page - r2 * 0.7, y_page + r2 * 0.2,
+                             x_page - r2 * 0.2, y_page - r2 * 0.5)
+                    # 长线：从中下到右上
+                    can.line(x_page - r2 * 0.2, y_page - r2 * 0.5,
+                             x_page + r2 * 0.8, y_page + r2 * 0.6)
 
             can.save()
             packet.seek(0)
