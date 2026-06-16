@@ -44,8 +44,8 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(denoised)
 
-    # 3. 倾斜校正
-    deskewed = _deskew(enhanced)
+    # 3. 倾斜校正（降采样加速 — 对大图先缩小再检测角度）
+    deskewed = _deskew_fast(enhanced)
 
     # 5. 质量筛查 — 模糊检测
     blur_score = cv2.Laplacian(deskewed, cv2.CV_64F).var()
@@ -59,35 +59,41 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     return Image.fromarray(result)
 
 
-def _deskew(img: np.ndarray) -> np.ndarray:
-    """检测图片倾斜角度并校正。
+def _deskew_fast(img: np.ndarray) -> np.ndarray:
+    """快速倾斜校正 — 降采样检测角度，全分辨率校正。
 
-    通过查找所有文本轮廓的最小外接矩形，计算平均倾斜角。
+    对大图（如 2481×3508）先缩小到 800px 检测角度，
+    避免在大图上做 findContours 耗时过长。
     """
-    # 反转（白字黑底 → 黑字白底）以检测文字轮廓
-    if np.mean(img) > 127:
-        inv = cv2.bitwise_not(img)
-    else:
-        inv = img.copy()
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
 
-    # 查找轮廓
+    # 大图降采样到 800px 检测角度
+    if max_dim > 800:
+        scale = 800 / max_dim
+        small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    else:
+        small = img
+
+    # 反转以检测文字轮廓
+    if np.mean(small) > 127:
+        inv = cv2.bitwise_not(small)
+    else:
+        inv = small.copy()
+
     contours, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        logger.debug("未检测到轮廓，跳过倾斜校正")
         return img
 
-    # 过滤小轮廓，只保留有意义文本区域
-    min_area = img.shape[0] * img.shape[1] * 0.0005
+    min_area = small.shape[0] * small.shape[1] * 0.0005
     valid_contours = [c for c in contours if cv2.contourArea(c) > min_area]
     if not valid_contours:
         return img
 
-    # 计算所有有效轮廓的最小外接矩形角度
     angles = []
     for c in valid_contours:
         rect = cv2.minAreaRect(c)
         angle = rect[2]
-        # OpenCV 返回角度范围 [-90, 0)，需要转换
         if angle < -45:
             angle = 90 + angle
         angles.append(angle)
@@ -95,23 +101,13 @@ def _deskew(img: np.ndarray) -> np.ndarray:
     if not angles:
         return img
 
-    # 取中位数角度作为整体倾斜角（抗离群点）
-    median_angle = np.median(angles)
-
-    # 角度过大（> 45°）可能是假检测，跳过校正
-    if abs(median_angle) > 45:
-        logger.debug("检测到异常角度 %.2f°，跳过校正", median_angle)
-        return img
-
-    # 只有角度足够大时才校正（避免小幅抖动）
-    if abs(median_angle) < 0.5:
+    median_angle = float(np.median(angles))
+    if abs(median_angle) > 45 or abs(median_angle) < 0.5:
         return img
 
     logger.info("检测到倾斜角度: %.2f°，执行校正", median_angle)
-    h, w = img.shape[:2]
     center = (w // 2, h // 2)
     matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-    # 旋转后保持原尺寸，自动填充黑色背景
     rotated = cv2.warpAffine(
         img, matrix, (w, h),
         flags=cv2.INTER_CUBIC,

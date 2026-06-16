@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from db.models import init_db, Task, Answer
+from db.models import init_db, Task, Answer, ReviewCorrection
 
 logger = logging.getLogger("db")
 
@@ -25,7 +25,11 @@ def _get_session():
 
 
 def save_task(pdf_path: str, graded_results: list[dict],
-              annotated_pdf: str | None = None) -> int:
+              annotated_pdf: str | None = None,
+              avg_confidence: float | None = None,
+              low_conf_ratio: float | None = None,
+              process_time: float | None = None,
+              needs_review: bool = False) -> int:
     """保存批改任务到数据库。"""
     from monitor.processor import PATTERN
     import re
@@ -54,11 +58,15 @@ def save_task(pdf_path: str, graded_results: list[dict],
             wrong_count=wrong,
             result_json=graded_results,
             annotated_pdf=annotated_pdf,
+            avg_confidence=avg_confidence,
+            low_conf_ratio=low_conf_ratio,
+            process_time=process_time,
+            needs_review=needs_review,
         )
         session.add(task)
         session.commit()
         task_id = task.id
-        logger.info("任务 #%d 已保存: %s", task_id, path.name)
+        logger.info("任务 #%d 已保存: %s (需复核=%s)", task_id, path.name, needs_review)
         return task_id
     except Exception as e:
         session.rollback()
@@ -140,5 +148,91 @@ def delete_answer(answer_id: int) -> bool:
         session.rollback()
         logger.error("删除答案失败: %s", e)
         return False
+    finally:
+        session.close()
+
+
+# ============================================================
+#  人工复核相关 CRUD
+# ============================================================
+
+def update_task_result(task_id: int, updated_results: list[dict],
+                       review_done: bool = True) -> bool:
+    """更新任务的批改结果（人工复核后），并重新计算统计。"""
+    session = _get_session()
+    try:
+        task = session.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return False
+
+        task.result_json = updated_results
+        task.correct_count = sum(1 for r in updated_results if r["status"] == "correct")
+        task.uncertain_count = sum(1 for r in updated_results if r["status"] == "uncertain")
+        task.wrong_count = sum(1 for r in updated_results if r["status"] == "wrong")
+        task.review_done = review_done
+        session.commit()
+        logger.info("任务 #%d 复核结果已更新", task_id)
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error("更新任务结果失败: %s", e)
+        return False
+    finally:
+        session.close()
+
+
+def save_correction(task_id: int, char_index: int,
+                    original_char: str, original_status: str,
+                    corrected_char: str, corrected_status: str,
+                    bbox_pixel: dict | None = None,
+                    confidence: float | None = None) -> int:
+    """保存单条人工复核修正记录。"""
+    session = _get_session()
+    try:
+        corr = ReviewCorrection(
+            task_id=task_id,
+            char_index=char_index,
+            original_char=original_char,
+            original_status=original_status,
+            corrected_char=corrected_char,
+            corrected_status=corrected_status,
+            bbox_pixel=bbox_pixel,
+            confidence=confidence,
+        )
+        session.add(corr)
+        session.commit()
+        return corr.id
+    except Exception as e:
+        session.rollback()
+        logger.error("保存修正记录失败: %s", e)
+        raise
+    finally:
+        session.close()
+
+
+def get_corrections(task_id: int) -> list[ReviewCorrection]:
+    """获取某任务的所有复核修正记录。"""
+    session = _get_session()
+    try:
+        return (
+            session.query(ReviewCorrection)
+            .filter(ReviewCorrection.task_id == task_id)
+            .order_by(ReviewCorrection.char_index)
+            .all()
+        )
+    finally:
+        session.close()
+
+
+def get_all_corrections(limit: int = 1000) -> list[ReviewCorrection]:
+    """获取所有修正记录（用于导出训练集）。"""
+    session = _get_session()
+    try:
+        return (
+            session.query(ReviewCorrection)
+            .order_by(ReviewCorrection.id.desc())
+            .limit(limit)
+            .all()
+        )
     finally:
         session.close()

@@ -5,6 +5,7 @@
 import io
 import re
 import shutil
+import time
 import logging
 from pathlib import Path
 
@@ -17,8 +18,13 @@ logger = logging.getLogger("processor")
 # 文件名契约: {班级}_{日期}_{序号}.pdf
 PATTERN = re.compile(r"(\w+)_(\d{4}-\d{2}-\d{2})_(\d+)\.pdf$")
 
-# 默认渲染 DPI（传递给 OCR）
-OCR_DPI = 300
+# 默认渲染 DPI（server 模型精度足够，200 DPI 平衡速度与精度）
+OCR_DPI = 200
+
+# 低置信度阈值 — 低于此值计为"低置信度字"
+LOW_CONFIDENCE_THRESHOLD = 0.60
+# 低置信度字占比超过此值则自动标记"需人工复核"
+REVIEW_TRIGGER_RATIO = 0.30
 
 
 def load_answers(class_name: str, date_str: str) -> list[str]:
@@ -56,6 +62,8 @@ def process_pdf(pdf_path: str) -> None:
     if not path.exists():
         logger.error("文件不存在: %s", pdf_path)
         return
+
+    t_start = time.time()
 
     # 0. 从文件名解析元数据
     m = PATTERN.search(path.name)
@@ -127,10 +135,36 @@ def process_pdf(pdf_path: str) -> None:
     from core.grader import grade
     graded = grade(student_answers, answers)
 
-    # 4. 保存到数据库
+    # ----------------------------------------------------------------
+    # 3.5 可观测性指标计算
+    # ----------------------------------------------------------------
+    confidences = [r["confidence"] for r in graded if r["confidence"] is not None]
+    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    low_conf_count = sum(1 for c in confidences if c < LOW_CONFIDENCE_THRESHOLD)
+    low_conf_ratio = low_conf_count / len(confidences) if confidences else 0.0
+    process_time = time.time() - t_start
+    needs_review = low_conf_ratio > REVIEW_TRIGGER_RATIO
+
+    logger.info(
+        "📊 可观测性: 平均置信度=%.1f%% | 低置信度字=%d/%d (%.1f%%) | 耗时=%.1fs | %s",
+        avg_conf * 100,
+        low_conf_count,
+        len(confidences),
+        low_conf_ratio * 100,
+        process_time,
+        "⚠️ 需人工复核" if needs_review else "✅ 质量正常",
+    )
+
+    # 4. 保存到数据库（含可观测性指标）
     try:
         from db.crud import save_task
-        save_task(str(path), graded)
+        save_task(
+            str(path), graded,
+            avg_confidence=avg_conf,
+            low_conf_ratio=low_conf_ratio,
+            process_time=process_time,
+            needs_review=needs_review,
+        )
         logger.info("任务已保存到数据库")
     except Exception as e:
         logger.warning("数据库保存失败（不影响后续）: %s", e)

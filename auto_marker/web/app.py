@@ -21,6 +21,9 @@ from db.crud import (
     get_answer,
     get_all_answers,
     delete_answer,
+    update_task_result,
+    save_correction,
+    get_corrections,
 )
 
 st.set_page_config(page_title="半自动批改台", layout="wide", page_icon="📝")
@@ -49,6 +52,10 @@ def _tasks_to_df(tasks) -> pd.DataFrame:
                 "错误": t.wrong_count,
                 "正确率": t.correct_count / t.total_chars if t.total_chars else None,
                 "正确率_显示": _fmt_pct(t.correct_count, t.total_chars),
+                "置信度": f"{t.avg_confidence:.0%}" if t.avg_confidence else "-",
+                "低置信占比": f"{t.low_conf_ratio:.0%}" if t.low_conf_ratio else "-",
+                "耗时": f"{t.process_time:.1f}s" if t.process_time else "-",
+                "复核": ("✅已复核" if t.review_done else ("🔍待复核" if t.needs_review else "-")),
             }
             for t in tasks
         ]
@@ -89,14 +96,30 @@ with tab1:
         total_uncertain = sum(t.uncertain_count for t in tasks)
         total_wrong = sum(t.wrong_count for t in tasks)
         avg_rate = total_correct / total_chars if total_chars else 0
+        needs_review_count = sum(1 for t in tasks if t.needs_review and not t.review_done)
 
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         col_m1.metric("📋 总任务数", total_tasks)
         col_m2.metric("📝 总批改字数", f"{total_chars:,}")
         col_m3.metric("✅ 平均正确率", f"{avg_rate:.1%}")
         col_m4.metric("⚠️ 总存疑数", total_uncertain)
+        col_m5.metric("🔍 待复核", needs_review_count)
 
         st.divider()
+
+        # ── 可观测性指标 ──
+        confs = [t.avg_confidence for t in tasks if t.avg_confidence is not None]
+        ratios = [t.low_conf_ratio for t in tasks if t.low_conf_ratio is not None]
+        times = [t.process_time for t in tasks if t.process_time is not None]
+
+        if confs or ratios or times:
+            st.subheader("🔍 OCR 可观测性")
+            col_o1, col_o2, col_o3 = st.columns(3)
+            col_o1.metric("平均 OCR 置信度", f"{sum(confs)/len(confs):.1%}" if confs else "-")
+            col_o2.metric("平均低置信度字占比", f"{sum(ratios)/len(ratios):.1%}" if ratios else "-")
+            col_o3.metric("平均处理耗时", f"{sum(times)/len(times):.1f}s" if times else "-")
+
+            st.divider()
 
         # ── 图表 ──
         col_c1, col_c2 = st.columns(2)
@@ -242,6 +265,22 @@ with tab2:
                     )
 
                     st.divider()
+
+                    # ── 可观测性指标展示 ──
+                    if task.avg_confidence is not None:
+                        col_v1, col_v2, col_v3, col_v4 = st.columns(4)
+                        col_v1.metric("平均置信度", f"{task.avg_confidence:.1%}")
+                        col_v2.metric("低置信度占比", f"{task.low_conf_ratio:.1%}")
+                        col_v3.metric("处理耗时", f"{task.process_time:.1f}s" if task.process_time else "-")
+                        if task.needs_review and not task.review_done:
+                            col_v4.metric("状态", "🔍 需人工复核")
+                        elif task.review_done:
+                            col_v4.metric("状态", "✅ 已复核")
+                        else:
+                            col_v4.metric("状态", "✅ 质量正常")
+
+                    st.divider()
+
                     col_r1, col_r2 = st.columns([1, 2])
                     with col_r1:
                         status_filter = st.radio(
@@ -279,25 +318,76 @@ with tab2:
                             "uncertain": "⚠️",
                             "wrong": "❌",
                         }
-                        detail_df = pd.DataFrame(
-                            [
-                                {
-                                    "字符": r["char"],
-                                    "预期": r["expected"],
-                                    "状态": f"{emoji_map.get(r['status'], '❓')} {r['status']}",
-                                    "置信度": f"{r['confidence']:.0%}",
-                                }
-                                for r in page_results
-                            ]
-                        )
 
-                        styled = _style_results_table(detail_df)
-                        st.dataframe(
-                            styled,
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.caption(f"当前页匹配 {len(page_results)} 个字")
+                        # ── 人工复核模式 ──
+                        st.divider()
+                        review_mode = st.checkbox("开启人工复核模式", key="review_mode")
+                        st.caption("勾选后可逐字修改状态，修改后点击「保存复核结果」")
+
+                        if review_mode:
+                            st.warning("复核模式已开启。修改下方下拉框后请点击保存按钮。")
+                            modified = []
+                            for i, r in enumerate(page_results):
+                                # 找到在完整 results 中的索引
+                                global_idx = results.index(r)
+                                col_e1, col_e2, col_e3, col_e4 = st.columns([1, 1, 1, 2])
+                                col_e1.write(f"**{r['char']}**")
+                                col_e2.write(f"预期: {r['expected']}")
+                                col_e3.write(f"置信度: {r['confidence']:.0%}")
+                                new_status = col_e4.selectbox(
+                                    f"状态 (#{global_idx})",
+                                    ["correct", "uncertain", "wrong"],
+                                    index=["correct", "uncertain", "wrong"].index(r["status"]),
+                                    format_func=lambda x: emoji_map[x] + " " + x,
+                                    key=f"review_{global_idx}",
+                                )
+                                if new_status != r["status"]:
+                                    modified.append((global_idx, r, new_status))
+
+                            if modified:
+                                st.info(f"检测到 {len(modified)} 处修改")
+                                if st.button("💾 保存复核结果", type="primary", use_container_width=True):
+                                    # 更新 results
+                                    for global_idx, orig_r, new_status in modified:
+                                        old_status = orig_r["status"]
+                                        results[global_idx]["status"] = new_status
+                                        # 保存修正记录
+                                        save_correction(
+                                            task_id=task.id,
+                                            char_index=global_idx,
+                                            original_char=orig_r["char"],
+                                            original_status=old_status,
+                                            corrected_char=orig_r["char"],
+                                            corrected_status=new_status,
+                                            bbox_pixel=orig_r.get("bbox_pixel"),
+                                            confidence=orig_r.get("confidence"),
+                                        )
+                                    # 更新任务
+                                    update_task_result(task.id, results, review_done=True)
+                                    st.success(f"已保存 {len(modified)} 处修改，任务 #{task.id} 标记为已复核")
+                                    st.rerun()
+                            else:
+                                st.caption("暂无修改")
+                        else:
+                            # 普通浏览模式
+                            detail_df = pd.DataFrame(
+                                [
+                                    {
+                                        "字符": r["char"],
+                                        "预期": r["expected"],
+                                        "状态": f"{emoji_map.get(r['status'], '❓')} {r['status']}",
+                                        "置信度": f"{r['confidence']:.0%}",
+                                    }
+                                    for r in page_results
+                                ]
+                            )
+                            styled = _style_results_table(detail_df)
+                            st.dataframe(
+                                styled,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            st.caption(f"当前页匹配 {len(page_results)} 个字")
                     else:
                         st.info("该页面无匹配结果")
 
