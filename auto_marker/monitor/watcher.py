@@ -88,7 +88,8 @@ def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg_path = ROOT / "config.ini"
     if cfg_path.exists():
-        cfg.read(str(cfg_path))
+        with open(str(cfg_path), "r", encoding="utf-8") as f:
+            cfg.read_file(f)
     return cfg
 
 

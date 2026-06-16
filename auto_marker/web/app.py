@@ -107,7 +107,7 @@ with tab3:
     config_path = ROOT / "config.ini"
     if config_path.exists():
         content = config_path.read_text(encoding="utf-8")
-        edited = st.text_area("config.ini", content, height=400, font="monospace")
+        edited = st.text_area("config.ini", content, height=400)
         if st.button("保存配置"):
             config_path.write_text(edited, encoding="utf-8")
             st.success("配置已保存，重启服务生效")
