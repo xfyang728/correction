@@ -34,8 +34,8 @@ def grade(ocr_results: list[dict], answers: list[str],
         logger.warning("OCR 结果为空，无法比对")
         return []
 
-    # 按 (page, y, x) 排序，保持阅读顺序
-    sorted_results = sorted(ocr_results, key=lambda r: (r["page"], r["bbox_pixel"][1], r["bbox_pixel"][0]))
+    # extract_student_answers 已按阅读顺序排序，直接使用
+    sorted_results = ocr_results
 
     graded = []
     for idx, r in enumerate(sorted_results):
