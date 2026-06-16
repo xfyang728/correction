@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+data/marker.db
+data/incoming/
+data/working/
+data/backup/
+data/output/
+data/logs/
+*.egg-info/
+dist/
+build/
+*.exe
