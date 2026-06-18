@@ -79,6 +79,7 @@ def grade(ocr_results: list[dict], answers: list[str],
                 "expected": expected,
                 "confidence": conf,
                 "status": status,
+                "question_idx": r.get("question_idx"),
                 "img_pixel_w": r["img_pixel_w"],
                 "img_pixel_h": r["img_pixel_h"],
             })
@@ -92,6 +93,7 @@ def grade(ocr_results: list[dict], answers: list[str],
                 "expected": "",
                 "confidence": r["confidence"],
                 "status": "wrong",
+                "question_idx": r.get("question_idx"),
                 "img_pixel_w": r["img_pixel_w"],
                 "img_pixel_h": r["img_pixel_h"],
             })
@@ -171,3 +173,70 @@ def _align(ocr_chars: list[str], answers: list[str],
 
     aligned.reverse()
     return aligned
+
+
+def summarize_by_question(graded: list[dict],
+                          question_regions: dict[int, list[dict]]
+                          ) -> dict[int, dict]:
+    """对批改结果按题目分组统计。
+
+    参数:
+        graded: grade() 的输出，每项需含 "question_idx" 字段
+        question_regions: layout_analyzer.detect_question_regions() 的输出
+
+    返回:
+        {page_idx: {
+            q_idx: {
+                "total": 2,
+                "correct": 2,
+                "uncertain": 0,
+                "wrong": 0,
+                "all_correct": True,
+                "marker_bbox": (x0,y0,x2,y2),  # 题号位置
+            }
+        }}
+
+        如果某页无题号信息，则该页不在返回结果中。
+    """
+    from collections import defaultdict
+
+    # 构建题号位置查找表: {page_idx: {q_idx: marker_bbox}}
+    marker_map: dict[int, dict] = {}
+    for page_idx, regions in question_regions.items():
+        marker_map[page_idx] = {r["q_idx"]: r["marker_bbox"] for r in regions}
+
+    # 按 (page, question_idx) 分组
+    groups: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    for g in graded:
+        q_idx = g.get("question_idx")
+        if q_idx is None:
+            continue  # 未分配到题号的字不参与按题统计
+        groups[(g["page"], q_idx)].append(g)
+
+    result: dict[int, dict] = {}
+    for (page_idx, q_idx), items in groups.items():
+        total = len(items)
+        correct = sum(1 for r in items if r["status"] == "correct")
+        uncertain = sum(1 for r in items if r["status"] == "uncertain")
+        wrong = sum(1 for r in items if r["status"] == "wrong")
+
+        if page_idx not in result:
+            result[page_idx] = {}
+
+        marker_bbox = marker_map.get(page_idx, {}).get(q_idx)
+        result[page_idx][q_idx] = {
+            "total": total,
+            "correct": correct,
+            "uncertain": uncertain,
+            "wrong": wrong,
+            "all_correct": correct == total and total > 0,
+            "marker_bbox": marker_bbox,
+        }
+
+    # 统计日志
+    total_questions = sum(len(qs) for qs in result.values())
+    correct_questions = sum(
+        1 for qs in result.values() for q in qs.values() if q["all_correct"]
+    )
+    logger.info("按题统计: %d 题, 其中 %d 题全部正确", total_questions, correct_questions)
+    return result

@@ -91,6 +91,7 @@ def process_pdf(pdf_path: str) -> None:
     logger.info("PDF 共 %d 页", num_pages)
 
     all_ocr_results: list[dict] = []
+    all_raw_lines: list[dict] = []  # 行级 OCR 数据（用于题目检测）
     page_img_sizes: list[tuple[int, int]] = []  # 每页 (w, h)
 
     for page_idx in range(num_pages):
@@ -109,8 +110,9 @@ def process_pdf(pdf_path: str) -> None:
 
         # Step B: OCR（对预处理后的图片进行文字识别）
         img_np = np.array(processed_img)
-        page_results = ocr_image(img_np, page_idx)
+        page_results, page_raw = ocr_image(img_np, page_idx)
         all_ocr_results.extend(page_results)
+        all_raw_lines.extend(page_raw)
 
     doc.close()
 
@@ -119,10 +121,12 @@ def process_pdf(pdf_path: str) -> None:
         _move_to(path, "failed")
         return
 
-    # Step C: 版面分析 → 提取学生手写答案
-    # 取最后一页的尺寸作为版面分析参考（单页用第一页也可）
+    # Step C: 版面分析 → 提取学生手写答案 + 题目检测
+    # 取第一页的尺寸作为版面分析参考
     ref_w, ref_h = page_img_sizes[0] if page_img_sizes else (0, 0)
-    student_answers = extract_student_answers(all_ocr_results, ref_w, ref_h)
+    student_answers, question_regions = extract_student_answers(
+        all_ocr_results, all_raw_lines, ref_w, ref_h
+    )
 
     if not student_answers:
         logger.warning("未提取到学生手写答案，放入 failed")
@@ -132,7 +136,7 @@ def process_pdf(pdf_path: str) -> None:
     # ----------------------------------------------------------------
     # 3. 比对（按页分组，每页独立与答案做 DP 对齐）
     # ----------------------------------------------------------------
-    from core.grader import grade
+    from core.grader import grade, summarize_by_question
 
     # 按页分组（每页 = 一个学生的独立答卷）
     from collections import defaultdict
@@ -149,6 +153,11 @@ def process_pdf(pdf_path: str) -> None:
                      page_idx + 1, len(page_answers[page_idx]), len(page_graded))
 
     logger.info("总对齐结果: %d 字（%d 页）", len(graded), len(page_answers))
+
+    # ----------------------------------------------------------------
+    # 3.3 按题统计汇总（用于按题标记模式）
+    # ----------------------------------------------------------------
+    question_summary = summarize_by_question(graded, question_regions)
 
     # ----------------------------------------------------------------
     # 3.5 可观测性指标计算（按页加权平均）
@@ -184,11 +193,12 @@ def process_pdf(pdf_path: str) -> None:
     except Exception as e:
         logger.warning("数据库保存失败（不影响后续）: %s", e)
 
-    # 5. 生成批注 PDF
+    # 5. 生成批注 PDF（按题模式：正确题号旁画大绿✓，错误字保留红圈）
     from core.pdf_annotator import annotate
     output_dir = Path(__file__).resolve().parent.parent / "data" / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    annotated_path = annotate(str(path), graded, str(output_dir))
+    annotated_path = annotate(str(path), graded, str(output_dir),
+                              question_summary=question_summary)
     logger.info("批注 PDF 已生成: %s", annotated_path)
 
     # 6. 打印

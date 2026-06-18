@@ -93,7 +93,7 @@ def _split_line_to_chars(text: str, line_box, confidence: float, page_idx: int,
     return results
 
 
-def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
+def ocr_image(img: np.ndarray, page_idx: int = 0) -> tuple[list[dict], list[dict]]:
     """对单张图片（numpy array）进行 OCR。
 
     参数:
@@ -101,6 +101,9 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
         page_idx: 页码（用于结果标记）
 
     返回:
+        (per_char_results, raw_lines)
+
+        per_char_results:
         [
             {
                 "page": page_idx,
@@ -109,6 +112,17 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
                 "confidence": 0.95,
                 "img_pixel_w": 2481,
                 "img_pixel_h": 3508,
+            },
+            ...
+        ]
+
+        raw_lines: PaddleOCR 行级原始结果（保留非中文字符，用于版面分析）
+        [
+            {
+                "page": page_idx,
+                "text": "(1) hú lián",            # 整行原文（含括号、数字、字母）
+                "bbox_pixel": (x0, y0, x2, y2),   # 行级 bbox
+                "confidence": 0.98,               # 行级置信度
             },
             ...
         ]
@@ -121,6 +135,7 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
     raw_results = reader.predict(input=img)
 
     results: list[dict] = []
+    raw_lines: list[dict] = []
     for res in raw_results:
         res_data = res.json.get("res", {})
         rec_texts = res_data.get("rec_texts", [])
@@ -132,17 +147,25 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
             if not text:
                 continue
 
-            # 拆分整行为单字
+            # 记录行级原始数据（保留整行原文，含非中文字符）
+            raw_lines.append({
+                "page": page_idx,
+                "text": text,
+                "bbox_pixel": tuple(box),
+                "confidence": score,
+            })
+
+            # 拆分整行为单字（只保留中文字符）
             char_results = _split_line_to_chars(
                 text, box, score, page_idx, img_w, img_h
             )
             results.extend(char_results)
 
-    logger.debug("第 %d 页: 识别到 %d 个字符", page_idx + 1, len(results))
-    return results
+    logger.debug("第 %d 页: 识别到 %d 个字符, %d 行", page_idx + 1, len(results), len(raw_lines))
+    return results, raw_lines
 
 
-def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
+def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> tuple[list[dict], list[dict]]:
     """对 PDF 逐页 OCR（保持原有接口，供其他模块调用）。
 
     参数:
@@ -151,12 +174,13 @@ def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
         dpi: 渲染 DPI（默认 200，平衡速度与精度）
 
     返回:
-        与 ocr_image() 相同的结构
+        (per_char_results, raw_lines)
     """
     _get_ocr()
 
     logger.info("开始 OCR: %s (dpi=%d)", pdf_path, dpi)
     results = []
+    all_raw_lines = []
 
     doc = fitz.open(pdf_path)
     num_pages = len(doc)
@@ -171,9 +195,10 @@ def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         img_np = np.array(img)
 
-        page_results = ocr_image(img_np, page_idx)
+        page_results, page_raw = ocr_image(img_np, page_idx)
         results.extend(page_results)
+        all_raw_lines.extend(page_raw)
 
     doc.close()
-    logger.info("OCR 完成: %d 个字符", len(results))
-    return results
+    logger.info("OCR 完成: %d 个字符, %d 行", len(results), len(all_raw_lines))
+    return results, all_raw_lines

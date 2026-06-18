@@ -325,8 +325,54 @@ with tab2:
                         hide_index=True,
                     )
 
+                    # ── 每页按题统计 ──
+                    st.divider()
+                    st.subheader("📝 每页按题统计")
+
+                    # 从当前页全量结果中按 question_idx 分组
+                    q_groups: dict[int, list[dict]] = {}
+                    for r in page_all_results:
+                        q_idx = r.get("question_idx")
+                        if q_idx is not None:
+                            q_groups.setdefault(q_idx, []).append(r)
+
+                    if q_groups:
+                        q_stats_data = []
+                        for q_idx in sorted(q_groups.keys()):
+                            items = q_groups[q_idx]
+                            total = len(items)
+                            correct = sum(1 for r in items if r["status"] == "correct")
+                            uncertain = sum(1 for r in items if r["status"] == "uncertain")
+                            wrong = sum(1 for r in items if r["status"] == "wrong")
+                            all_correct = correct == total and total > 0
+                            q_stats_data.append({
+                                "题号": f"第 {q_idx + 1} 题",
+                                "字数": total,
+                                "正确": correct,
+                                "存疑": uncertain,
+                                "错误": wrong,
+                                "正确率": _fmt_pct(correct, total),
+                                "状态": "✅ 全部正确" if all_correct else "❌ 有误",
+                            })
+                        st.dataframe(
+                            pd.DataFrame(q_stats_data),
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "正确率": st.column_config.ProgressColumn(
+                                    "正确率",
+                                    format=".0%",
+                                    min_value=0,
+                                    max_value=1,
+                                ),
+                            },
+                        )
+                    else:
+                        st.caption("该页无按题分组数据（可能无题号识别结果）")
+
                     # 过滤
                     page_results = [r for r in results if r["page"] == page_sel]
+                    page_all_results = page_results  # 保存过滤前的全量结果（用于按题统计）
                     if status_filter != "全部":
                         page_results = [
                             r for r in page_results if r["status"] == status_filter
