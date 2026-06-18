@@ -30,7 +30,8 @@ def _pixel_to_page(x_pixel: float, y_pixel: float,
 
 
 def _draw_checkmark(can: canvas.Canvas, x: float, y: float, size: float):
-    """绘制绿勾 ✓。"""
+    """绘制绿勾 ✓（大小限制 18pt）。"""
+    size = min(size, 18)
     can.setStrokeColorRGB(0, 0.6, 0)
     can.setLineWidth(2.5)
     # 左上 → 中下
@@ -43,7 +44,8 @@ def _draw_checkmark(can: canvas.Canvas, x: float, y: float, size: float):
 
 def _draw_wrong_circle(can: canvas.Canvas, x: float, y: float,
                        radius: float, conf: float):
-    """绘制错误红圈。"""
+    """绘制错误红圈（大小限制 18pt）。"""
+    radius = min(radius, 18)
     can.setStrokeColorRGB(1, 0, 0)
     can.setLineWidth(2)
     can.circle(x, y, radius)
@@ -52,7 +54,8 @@ def _draw_wrong_circle(can: canvas.Canvas, x: float, y: float,
 
 
 def _draw_uncertain_triangle(can: canvas.Canvas, x: float, y: float, radius: float):
-    """绘制存疑橙三角。"""
+    """绘制存疑橙三角（大小限制 18pt）。"""
+    radius = min(radius, 18)
     can.setStrokeColorRGB(1, 0.6, 0)
     can.setLineWidth(2)
     can.setFillColorRGB(1, 0.8, 0.2)
@@ -196,12 +199,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
                         page.width, page.height,
                     )
 
-                    # 大绿勾（1.5 倍单字大小）
+                    # 大绿勾（大小限制 18pt）
                     scale = page.width / ocr_img_w if ocr_img_w > 0 else 1
-                    q_mark_size = max(
+                    q_mark_size = min(max(
                         marker_bbox[2] - marker_bbox[0],
                         marker_bbox[3] - marker_bbox[1],
-                    ) * 0.7 * scale
+                    ) * 0.7 * scale, 18)
 
                     can.setStrokeColorRGB(0, 0.6, 0)
                     can.setLineWidth(3)

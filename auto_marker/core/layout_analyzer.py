@@ -13,8 +13,8 @@ import re
 
 logger = logging.getLogger("layout_analyzer")
 
-# 题目序号模式： (1) 或 1. 或 1、
-_QUESTION_PATTERN = re.compile(r'^\((\d+)\)|^(\d+)[.、]')
+# 题目序号模式： (1) 或 （1） 或 1. 或 1、
+_QUESTION_PATTERN = re.compile(r'^[（(](\d+)[)）]|^(\d+)[.、]')
 
 
 def cluster_by_row(ocr_results: list[dict], img_h: int) -> list[list[dict]]:
@@ -223,7 +223,7 @@ def assign_to_questions(handwritten_items: list[dict],
         cy = _center_y(item)
         matched = None
         for r in regions:
-            if r["y_start"] <= cy <= r["y_end"]:
+            if r["y_start"] <= cy < r["y_end"]:
                 matched = r["q_idx"]
                 break
 
