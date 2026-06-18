@@ -9,8 +9,8 @@ flowchart LR
     A[复印机] -->|扫描到FTP| B[FTP 服务器]
     B -->|文件事件| C[监控服务]
     C -->|本地读取| D[图像预处理]
-    D -->|版面分析| E[PaddleOCR 3.0]
-    E -->|识别结果| F[DP 对齐比对]
+    D -->|版面分析| E[PaddleOCR 3.7]
+    E -->|按页分组| F[逐页 DP 对齐]
     F -->|批改结果| G[PDF 批注]
     G -->|发送打印| H[打印机]
     C -->|记录| I[(SQLite)]
@@ -25,7 +25,7 @@ flowchart LR
 2. **文件稳定检测** — 等待文件写入完成
 3. **图像预处理** — CLAHE 对比度增强 + 快速倾斜校正（降采样检测）
 4. **版面分析** — 聚类分行 + 过滤印刷体，只保留手写答案
-5. **OCR 识别** — PaddleOCR 3.0 PP-OCRv5_server（中英文手写）
+5. **OCR 识别** — PaddleOCR 3.7 PP-OCRv6 Medium（中英文手写，×50 加速）
 6. **动态规划对齐比对** — Needleman-Wunsch 算法 + 置信度门控
 7. **生成批注** — 绿勾/橙三角/红圈叠加在原 PDF 上
 8. **打印输出** — 发送到指定打印机
@@ -97,6 +97,10 @@ C:\Users\yang\AppData\Local\Programs\Python\Python312\python.exe run_test.py --p
 |--------|------|
 | `301_2025-03-20_001.pdf` | 301 班，3 月 20 日，第 1 份 |
 
+> **多页 = 多学生合订**：一份 PDF 可能包含 N 页（如 11 页），每页是一个不同学生的独立答卷。
+> 系统自动按页分别批改，每页独立与答案做 DP 对齐比对。
+> `{序号}` 表示批号（扫描批次），不是学生编号。
+
 ## 状态说明
 
 | 状态 | 颜色 | 条件 |
@@ -158,14 +162,15 @@ OCR 是 CPU 模式下的主要瓶颈。如需进一步加速：
 - watchdog — 文件系统监控
 - pdfplumber + PyMuPDF — PDF 读写
 - reportlab — PDF 批注绘制
-- paddleocr==3.0.0 + paddlepaddle==3.0.0 — OCR 引擎
+- paddleocr>=3.6.0,<4.0 + paddlepaddle>=3.2.1,<4.0 — OCR 引擎（PP-OCRv6 Medium）
 - opencv-python — 图像预处理
 - sqlalchemy — ORM
 - streamlit — Web 管理界面
 
 ## 开发计划
 
-- [x] PaddleOCR 3.0 PP-OCRv5 集成
+- [x] PP-OCRv6 Medium 升级（×50 加速，+5.1% 精度）
+- [x] 多学生合订 PDF 按页分组批改
 - [x] 图像预处理（去噪/增强/校正）
 - [x] 版面分析（分行 + 答案提取）
 - [x] 动态规划对齐比对
@@ -176,4 +181,3 @@ OCR 是 CPU 模式下的主要瓶颈。如需进一步加速：
 - [ ] 学情分析报表
 - [ ] 微信/钉钉推送
 - [ ] GPU 推理支持
-- [ ] OCR 引擎抽象层（多模型切换）

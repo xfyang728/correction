@@ -1,12 +1,14 @@
 """
-OCR 引擎 — PaddleOCR 3.0 (PP-OCRv5) 封装。
+OCR 引擎 — PaddleOCR 3.6 (PP-OCRv6 Medium) 封装。
 
-使用 PP-OCRv5_server 高精度模型，支持手写体识别。
-PP-OCRv5 为整行识别，本模块负责拆分为单字并保留 bbox。
+使用 PP-OCRv6 Medium 轻量高精度模型，支持手写体识别。
+模型自动下载到 `model/` 目录下。
+PP-OCRv6 为整行识别，本模块负责拆分为单字并保留 bbox。
 """
 
 import logging
-import re
+import os
+from pathlib import Path
 
 import fitz  # PyMuPDF
 import numpy as np
@@ -14,26 +16,37 @@ from PIL import Image
 
 logger = logging.getLogger("ocr")
 
+# 模型存储根目录
+MODEL_ROOT = Path(__file__).resolve().parent.parent / "model"
+
 
 # 全局单例（PaddleOCR 初始化较慢，只做一次）
 _ocr_instance = None
 
 
 def _get_ocr():
-    """获取或初始化 PaddleOCR 3.0 实例（PP-OCRv5 server）。"""
+    """获取或初始化 PaddleOCR 3.6 实例（PP-OCRv6 Medium）。"""
     global _ocr_instance
     if _ocr_instance is None:
-        logger.info("正在初始化 PaddleOCR 3.0（PP-OCRv5_server，首次加载将下载模型）...")
+        # 确保模型目录存在
+        MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+
+        logger.info("正在初始化 PaddleOCR 3.6（PP-OCRv6 Medium，首次加载将下载模型）...")
+        logger.info("模型下载路径: %s", MODEL_ROOT)
+
         try:
+            # 设置 PaddleX 模型下载根目录，确保下载到 model/
+            os.environ["PADDLE_PDX_CACHE_HOME"] = str(MODEL_ROOT)
             from paddleocr import PaddleOCR
         except ImportError:
-            raise ImportError("请安装 paddleocr: pip install paddleocr==3.0.0")
+            raise ImportError("请安装 paddleocr: pip install paddleocr>=3.6.0")
+
         _ocr_instance = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
         )
-        logger.info("PaddleOCR 3.0 就绪（PP-OCRv5 server）")
+        logger.info("PaddleOCR 3.6 就绪（PP-OCRv6 Medium）")
     return _ocr_instance
 
 
@@ -104,7 +117,7 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
     img_h, img_w = img.shape[:2]
     logger.debug("OCR 第 %d 页: %dx%d 像素", page_idx + 1, img_w, img_h)
 
-    # PP-OCRv5 使用 predict() API，直接接受 numpy array
+    # PP-OCRv6 使用 predict() API，直接接受 numpy array
     raw_results = reader.predict(input=img)
 
     results: list[dict] = []
@@ -129,13 +142,13 @@ def ocr_image(img: np.ndarray, page_idx: int = 0) -> list[dict]:
     return results
 
 
-def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 300) -> list[dict]:
+def ocr_pdf(pdf_path: str, use_gpu: bool = False, dpi: int = 200) -> list[dict]:
     """对 PDF 逐页 OCR（保持原有接口，供其他模块调用）。
 
     参数:
         pdf_path: PDF 文件路径
-        use_gpu: 是否使用 GPU（默认 False，PP-OCRv5 自动检测）
-        dpi: 渲染 DPI（默认 300）
+        use_gpu: 是否使用 GPU（默认 False，PP-OCRv6 自动检测）
+        dpi: 渲染 DPI（默认 200，平衡速度与精度）
 
     返回:
         与 ocr_image() 相同的结构

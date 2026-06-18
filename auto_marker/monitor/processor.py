@@ -130,13 +130,28 @@ def process_pdf(pdf_path: str) -> None:
         return
 
     # ----------------------------------------------------------------
-    # 3. 比对（使用提取后的答案）
+    # 3. 比对（按页分组，每页独立与答案做 DP 对齐）
     # ----------------------------------------------------------------
     from core.grader import grade
-    graded = grade(student_answers, answers)
+
+    # 按页分组（每页 = 一个学生的独立答卷）
+    from collections import defaultdict
+    page_answers = defaultdict(list)
+    for r in student_answers:
+        page_answers[r["page"]].append(r)
+
+    # 每页独立与答案做 DP 对齐
+    graded = []
+    for page_idx in sorted(page_answers.keys()):
+        page_graded = grade(page_answers[page_idx], answers)
+        graded.extend(page_graded)
+        logger.info("第 %d 页: OCR %d 字 → 对齐 %d 字",
+                     page_idx + 1, len(page_answers[page_idx]), len(page_graded))
+
+    logger.info("总对齐结果: %d 字（%d 页）", len(graded), len(page_answers))
 
     # ----------------------------------------------------------------
-    # 3.5 可观测性指标计算
+    # 3.5 可观测性指标计算（按页加权平均）
     # ----------------------------------------------------------------
     confidences = [r["confidence"] for r in graded if r["confidence"] is not None]
     avg_conf = sum(confidences) / len(confidences) if confidences else 0.0

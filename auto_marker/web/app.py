@@ -305,6 +305,26 @@ with tab2:
                             key="page_selector",
                         )
 
+                    # ── 每页统计 ──
+                    st.divider()
+                    st.subheader("📊 每页统计")
+                    page_stats_data = []
+                    for p in pages:
+                        p_results = [r for r in results if r["page"] == p]
+                        total = len(p_results)
+                        correct = sum(1 for r in p_results if r["status"] == "correct")
+                        page_stats_data.append({
+                            "页码": f"第 {p+1} 页",
+                            "字数": total,
+                            "正确": correct,
+                            "正确率": _fmt_pct(correct, total),
+                        })
+                    st.dataframe(
+                        pd.DataFrame(page_stats_data),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
                     # 过滤
                     page_results = [r for r in results if r["page"] == page_sel]
                     if status_filter != "全部":
