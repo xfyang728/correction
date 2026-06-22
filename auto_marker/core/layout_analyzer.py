@@ -19,8 +19,8 @@ logger = logging.getLogger("layout_analyzer")
 _QUESTION_PATTERN = re.compile(r'[（(](\d+)[)）]|^(\d+)[.、]')
 
 # 手写/印刷判别阈值（200 DPI 下）
-HANDWRITTEN_HEIGHT_MIN = 70   # 手写字高度 ≥ 70px
-PINYIN_HEIGHT_MAX = 50        # 拼音提示高度 ≤ 50px
+HANDWRITTEN_HEIGHT_MIN = 90   # 手写字高度 ≥ 90px (~12.5pt)，低于此值视为印刷体
+PINYIN_HEIGHT_MAX = 55        # 拼音提示高度 ≤ 55px
 
 
 def _bbox_h(bbox: tuple) -> int:

@@ -30,8 +30,7 @@ def _pixel_to_page(x_pixel: float, y_pixel: float,
 
 
 def _draw_checkmark(can: canvas.Canvas, x: float, y: float, size: float):
-    """绘制绿勾 ✓（大小限制 18pt）。"""
-    size = min(size, 18)
+    """绘制绿勾 ✓。"""
     can.setStrokeColorRGB(0, 0.6, 0)
     can.setLineWidth(2.5)
     # 左上 → 中下
@@ -44,7 +43,7 @@ def _draw_checkmark(can: canvas.Canvas, x: float, y: float, size: float):
 
 def _draw_wrong_circle(can: canvas.Canvas, x: float, y: float,
                        radius: float, conf: float):
-    """绘制错误红圈（大小限制 18pt）。"""
+    """绘制错误红圈。"""
     radius = min(radius, 18)
     can.setStrokeColorRGB(1, 0, 0)
     can.setLineWidth(2)
@@ -54,7 +53,7 @@ def _draw_wrong_circle(can: canvas.Canvas, x: float, y: float,
 
 
 def _draw_uncertain_triangle(can: canvas.Canvas, x: float, y: float, radius: float):
-    """绘制存疑橙三角（大小限制 18pt）。"""
+    """绘制存疑橙三角。"""
     radius = min(radius, 18)
     can.setStrokeColorRGB(1, 0.6, 0)
     can.setLineWidth(2)
@@ -115,6 +114,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
             # 收集本页批注
             page_results = [r for r in graded_results if r["page"] == page_num]
 
+            # ---- 如果本页无批注结果，直接添加原始页 ----
+            if not page_results:
+                page_obj = pdf_reader.pages[page_num]
+                pdf_writer.add_page(page_obj)
+                continue
+
             # ---- 创建批注图层 ----
             packet = io.BytesIO()
             can = canvas.Canvas(packet, pagesize=(page.width, page.height))
@@ -134,15 +139,26 @@ def annotate(original_pdf: str, graded_results: list[dict],
                 conf = r["confidence"]
                 q_idx = r.get("question_idx")
 
-                # 逐字标记的 bbox 中心
-                cx_pixel = (bbox[0] + bbox[2]) / 2
-                cy_pixel = (bbox[1] + bbox[3]) / 2
-                bw_pixel = bbox[2] - bbox[0]
-                bh_pixel = bbox[3] - bbox[1]
-                mark_radius = max(bw_pixel, bh_pixel) * 0.6
-
                 ocr_img_w = r["img_pixel_w"]
                 ocr_img_h = r["img_pixel_h"]
+
+                # ---- 坐标有效性验证 ----
+                # bbox 应在 [0, img_w] × [0, img_h] 范围内
+                bx0, by0, bx2, by2 = bbox
+                if not (0 <= bx0 <= ocr_img_w and 0 <= bx2 <= ocr_img_w and
+                        0 <= by0 <= ocr_img_h and 0 <= by2 <= ocr_img_h):
+                    logger.warning("坐标越界: bbox=%s, img_size=%dx%d, skip",
+                                   bbox, ocr_img_w, ocr_img_h)
+                    continue
+
+                # 逐字标记的 bbox 中心（钳制到有效范围）
+                cx_pixel = max(0, min((bbox[0] + bbox[2]) / 2, ocr_img_w))
+                cy_pixel = max(0, min((bbox[1] + bbox[3]) / 2, ocr_img_h))
+                bw_pixel = bbox[2] - bbox[0]
+                bh_pixel = bbox[3] - bbox[1]
+                # 最小半径限制（避免 bbox 过小时标记不可见）
+                mark_radius = max(max(bw_pixel, bh_pixel) * 0.6, 8)
+
                 x_page, y_page = _pixel_to_page(
                     cx_pixel, cy_pixel,
                     ocr_img_w, ocr_img_h,
@@ -150,6 +166,9 @@ def annotate(original_pdf: str, graded_results: list[dict],
                 )
                 scale = page.width / ocr_img_w if ocr_img_w > 0 else 1
                 mark_r = mark_radius * scale
+
+                # 半径上下限：8~18pt
+                mark_r = max(min(mark_r, 18), 8)
 
                 # ---- 按题模式 ----
                 if use_question_mode:

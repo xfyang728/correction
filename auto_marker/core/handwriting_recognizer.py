@@ -132,13 +132,19 @@ def recognize_handwriting(
             continue
 
         # 等宽切分：在原图坐标系下估算每个字符 bbox
+        # 加 5% 内边距使中心点更贴近字符视觉中心
         bx0, by0, bx2, by2 = bbox
         region_w = bx2 - bx0
         char_w = region_w / len(chars)
+        margin = char_w * 0.05  # 每侧收缩 5%，避免标记偏移到字符间隙
 
         for i, ch in enumerate(chars):
-            cx0 = int(bx0 + i * char_w)
-            cx2 = int(bx0 + (i + 1) * char_w)
+            cx0 = int(bx0 + i * char_w + margin)
+            cx2 = int(bx0 + (i + 1) * char_w - margin)
+            # 确保最小宽度
+            if cx2 <= cx0:
+                cx0 = int(bx0 + i * char_w)
+                cx2 = int(bx0 + (i + 1) * char_w)
 
             all_results.append({
                 "page": page_idx,
