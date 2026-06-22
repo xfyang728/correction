@@ -1,8 +1,8 @@
 """
-流水线调度 — 从文件名解析元数据，依次执行：预处理 → OCR → 版面分析 → 比对 → 批注 → 打印 → 归档。
+流水线调度 — 从文件名解析元数据，依次执行：
+  渲染 → 预处理 → 文本检测 → 版面分析与分离 → 手写识别 → 比对 → 批注 → 打印 → 归档。
 """
 
-import io
 import re
 import shutil
 import time
@@ -80,18 +80,19 @@ def process_pdf(pdf_path: str) -> None:
     logger.info("答案长度: %d 字", len(answers))
 
     # ----------------------------------------------------------------
-    # 2. 四步流水线：渲染 → 预处理 → OCR → 版面分析
+    # 2. 三阶段流水线：渲染 → 预处理 → 文本检测 → 版面分析与分离 → 手写识别
     # ----------------------------------------------------------------
     from core.image_processor import preprocess_image
-    from core.ocr_engine import ocr_image
-    from core.layout_analyzer import extract_student_answers
+    from core.text_detector import detect_text
+    from core.layout_analyzer import analyze_layout
+    from core.handwriting_recognizer import recognize_handwriting
 
     doc = fitz.open(str(path))
     num_pages = len(doc)
     logger.info("PDF 共 %d 页", num_pages)
 
-    all_ocr_results: list[dict] = []
-    all_raw_lines: list[dict] = []  # 行级 OCR 数据（用于题目检测）
+    all_results: list[dict] = []
+    question_regions: dict[int, list[dict]] = {}
     page_img_sizes: list[tuple[int, int]] = []  # 每页 (w, h)
 
     for page_idx in range(num_pages):
@@ -104,32 +105,42 @@ def process_pdf(pdf_path: str) -> None:
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         page_img_sizes.append((img.width, img.height))
 
-        # Step A: 图像预处理（去噪、二值化、增强、校正）
+        # Step A: 图像预处理（去噪、增强、校正）
         processed_img = preprocess_image(img)
+        processed_np = np.array(processed_img)
         logger.debug("第 %d 页: 预处理完成 (%dx%d)", page_idx + 1, img.width, img.height)
 
-        # Step B: OCR（对预处理后的图片进行文字识别）
-        img_np = np.array(processed_img)
-        page_results, page_raw = ocr_image(img_np, page_idx)
-        all_ocr_results.extend(page_results)
-        all_raw_lines.extend(page_raw)
+        # Step B: 阶段一 — 文本检测（PP-OCRv6 det model）
+        # 返回 (det_boxes, ocr_records) — 一次 predict() 同时获取检测+识别
+        det_boxes, ocr_records = detect_text(processed_np, page_idx)
+        logger.debug("第 %d 页: 检测到 %d 个文本区域, %d 条识别记录",
+                      page_idx + 1, len(det_boxes), len(ocr_records))
+
+        # Step C: 阶段二 — 版面分析与分离（基于检测框高度分类）
+        img_h = processed_np.shape[0]
+        layout_result = analyze_layout(det_boxes, img_h, page_idx)
+        hw_boxes = layout_result["handwriting_boxes"]
+        logger.info("第 %d 页: 版面分析 → %d 个手写区域",
+                     page_idx + 1, len(hw_boxes))
+
+        # 合并每页的 question_regions
+        for pg, regions in layout_result["question_regions"].items():
+            question_regions.setdefault(pg, []).extend(regions)
+
+        if not hw_boxes:
+            logger.warning("第 %d 页: 未检测到手写区域", page_idx + 1)
+            continue
+
+        # Step D: 阶段三 — 手写识别（从全图 OCR 结果匹配手写区域）
+        page_results = recognize_handwriting(
+            processed_np, hw_boxes, ocr_records, page_idx,
+        )
+        all_results.extend(page_results)
 
     doc.close()
 
-    if not all_ocr_results:
-        logger.warning("OCR 无结果，放入 failed")
-        _move_to(path, "failed")
-        return
-
-    # Step C: 版面分析 → 提取学生手写答案 + 题目检测
-    # 取第一页的尺寸作为版面分析参考
-    ref_w, ref_h = page_img_sizes[0] if page_img_sizes else (0, 0)
-    student_answers, question_regions = extract_student_answers(
-        all_ocr_results, all_raw_lines, ref_w, ref_h
-    )
-
-    if not student_answers:
-        logger.warning("未提取到学生手写答案，放入 failed")
+    if not all_results:
+        logger.warning("未识别到任何手写内容，放入 failed")
         _move_to(path, "failed")
         return
 
@@ -141,7 +152,7 @@ def process_pdf(pdf_path: str) -> None:
     # 按页分组（每页 = 一个学生的独立答卷）
     from collections import defaultdict
     page_answers = defaultdict(list)
-    for r in student_answers:
+    for r in all_results:
         page_answers[r["page"]].append(r)
 
     # 每页独立与答案做 DP 对齐
@@ -149,7 +160,7 @@ def process_pdf(pdf_path: str) -> None:
     for page_idx in sorted(page_answers.keys()):
         page_graded = grade(page_answers[page_idx], answers)
         graded.extend(page_graded)
-        logger.info("第 %d 页: OCR %d 字 → 对齐 %d 字",
+        logger.info("第 %d 页: 手写 %d 字 → 对齐 %d 字",
                      page_idx + 1, len(page_answers[page_idx]), len(page_graded))
 
     logger.info("总对齐结果: %d 字（%d 页）", len(graded), len(page_answers))
