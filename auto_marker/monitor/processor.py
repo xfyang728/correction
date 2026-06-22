@@ -118,7 +118,8 @@ def process_pdf(pdf_path: str) -> None:
 
         # Step C: 阶段二 — 版面分析与分离（基于检测框高度分类）
         img_h = processed_np.shape[0]
-        layout_result = analyze_layout(det_boxes, img_h, page_idx)
+        layout_result = analyze_layout(det_boxes, img_h, page_idx,
+                                       ocr_records=ocr_records)
         hw_boxes = layout_result["handwriting_boxes"]
         logger.info("第 %d 页: 版面分析 → %d 个手写区域",
                      page_idx + 1, len(hw_boxes))

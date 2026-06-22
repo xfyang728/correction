@@ -85,6 +85,7 @@ streamlit run web/app.py
 
 ```bash
 C:\Users\yang\AppData\Local\Programs\Python\Python312\python.exe run_test.py --pdf 301_2025-03-20_001.pdf
+python run_test.py --pdf 301_2026-06-18_003.pdf
 ```
 
 ## 文件名约定
