@@ -2,11 +2,11 @@
 数据操作 — CRUD 封装。
 """
 
-import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 
-from db.models import init_db, Task, Answer, ReviewCorrection
+from db.models import Answer, ReviewCorrection, Task, init_db
 
 logger = logging.getLogger("db")
 
@@ -24,96 +24,97 @@ def _get_session():
     return _session_factory()
 
 
+@contextmanager
+def _session_scope():
+    """Session 生命周期 context manager — 自动 commit/rollback/close。"""
+    session = _get_session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def save_task(pdf_path: str, graded_results: list[dict],
+              class_name: str | None = None,
+              date_str: str | None = None,
+              seq: str | None = None,
               annotated_pdf: str | None = None,
               avg_confidence: float | None = None,
               low_conf_ratio: float | None = None,
               process_time: float | None = None,
               needs_review: bool = False) -> int:
-    """保存批改任务到数据库。"""
-    from monitor.processor import PATTERN
-    import re
+    """保存批改任务到数据库。
 
+    元数据（class_name/date_str/seq）由调用方解析后传入，
+    避免数据层反向依赖业务模块。
+    """
     path = Path(pdf_path)
-    m = PATTERN.search(path.name)
-    class_name = m.group(1) if m else None
-    date_str = m.group(2) if m else None
-    seq = m.group(3) if m else None
 
     total = len(graded_results)
     correct = sum(1 for r in graded_results if r["status"] == "correct")
     uncertain = sum(1 for r in graded_results if r["status"] == "uncertain")
     wrong = sum(1 for r in graded_results if r["status"] == "wrong")
 
-    session = _get_session()
     try:
-        task = Task(
-            filename=path.name,
-            class_name=class_name,
-            date_str=date_str,
-            seq=seq,
-            total_chars=total,
-            correct_count=correct,
-            uncertain_count=uncertain,
-            wrong_count=wrong,
-            result_json=graded_results,
-            annotated_pdf=annotated_pdf,
-            avg_confidence=avg_confidence,
-            low_conf_ratio=low_conf_ratio,
-            process_time=process_time,
-            needs_review=needs_review,
-        )
-        session.add(task)
-        session.commit()
-        task_id = task.id
-        logger.info("任务 #%d 已保存: %s (需复核=%s)", task_id, path.name, needs_review)
-        return task_id
+        with _session_scope() as session:
+            task = Task(
+                filename=path.name,
+                class_name=class_name,
+                date_str=date_str,
+                seq=seq,
+                total_chars=total,
+                correct_count=correct,
+                uncertain_count=uncertain,
+                wrong_count=wrong,
+                result_json=graded_results,
+                annotated_pdf=annotated_pdf,
+                avg_confidence=avg_confidence,
+                low_conf_ratio=low_conf_ratio,
+                process_time=process_time,
+                needs_review=needs_review,
+            )
+            session.add(task)
+            session.flush()  # 获取 task.id
+            task_id = task.id
+            logger.info("任务 #%d 已保存: %s (需复核=%s)", task_id, path.name, needs_review)
+            return task_id
     except Exception as e:
-        session.rollback()
         logger.error("保存任务失败: %s", e)
         raise
-    finally:
-        session.close()
 
 
 def get_tasks(limit: int = 50) -> list[Task]:
     """获取最近任务列表。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         return session.query(Task).order_by(Task.id.desc()).limit(limit).all()
-    finally:
-        session.close()
 
 
 def get_task(task_id: int) -> Task | None:
     """获取单个任务。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         return session.query(Task).filter(Task.id == task_id).first()
-    finally:
-        session.close()
 
 
 def save_answer(class_name: str, date_str: str, content: str) -> int:
     """保存标准答案。"""
-    session = _get_session()
     try:
-        ans = Answer(class_name=class_name, date_str=date_str, content=content)
-        session.add(ans)
-        session.commit()
-        return ans.id
+        with _session_scope() as session:
+            ans = Answer(class_name=class_name, date_str=date_str, content=content)
+            session.add(ans)
+            session.flush()
+            return ans.id
     except Exception as e:
-        session.rollback()
         logger.error("保存答案失败: %s", e)
         raise
-    finally:
-        session.close()
 
 
 def get_answer(class_name: str | None = None, date_str: str | None = None) -> str | None:
     """获取答案内容。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         q = session.query(Answer)
         if class_name:
             q = q.filter(Answer.class_name == class_name)
@@ -121,35 +122,26 @@ def get_answer(class_name: str | None = None, date_str: str | None = None) -> st
             q = q.filter(Answer.date_str == date_str)
         ans = q.order_by(Answer.id.desc()).first()
         return ans.content if ans else None
-    finally:
-        session.close()
 
 
 def get_all_answers() -> list[Answer]:
     """获取所有答案记录。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         return session.query(Answer).order_by(Answer.id.desc()).all()
-    finally:
-        session.close()
 
 
 def delete_answer(answer_id: int) -> bool:
     """删除指定答案。"""
-    session = _get_session()
     try:
-        ans = session.query(Answer).filter(Answer.id == answer_id).first()
-        if ans:
-            session.delete(ans)
-            session.commit()
-            return True
-        return False
+        with _session_scope() as session:
+            ans = session.query(Answer).filter(Answer.id == answer_id).first()
+            if ans:
+                session.delete(ans)
+                return True
+            return False
     except Exception as e:
-        session.rollback()
         logger.error("删除答案失败: %s", e)
         return False
-    finally:
-        session.close()
 
 
 # ============================================================
@@ -159,26 +151,22 @@ def delete_answer(answer_id: int) -> bool:
 def update_task_result(task_id: int, updated_results: list[dict],
                        review_done: bool = True) -> bool:
     """更新任务的批改结果（人工复核后），并重新计算统计。"""
-    session = _get_session()
     try:
-        task = session.query(Task).filter(Task.id == task_id).first()
-        if not task:
-            return False
+        with _session_scope() as session:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                return False
 
-        task.result_json = updated_results
-        task.correct_count = sum(1 for r in updated_results if r["status"] == "correct")
-        task.uncertain_count = sum(1 for r in updated_results if r["status"] == "uncertain")
-        task.wrong_count = sum(1 for r in updated_results if r["status"] == "wrong")
-        task.review_done = review_done
-        session.commit()
-        logger.info("任务 #%d 复核结果已更新", task_id)
-        return True
+            task.result_json = updated_results
+            task.correct_count = sum(1 for r in updated_results if r["status"] == "correct")
+            task.uncertain_count = sum(1 for r in updated_results if r["status"] == "uncertain")
+            task.wrong_count = sum(1 for r in updated_results if r["status"] == "wrong")
+            task.review_done = review_done
+            logger.info("任务 #%d 复核结果已更新", task_id)
+            return True
     except Exception as e:
-        session.rollback()
         logger.error("更新任务结果失败: %s", e)
         return False
-    finally:
-        session.close()
 
 
 def save_correction(task_id: int, char_index: int,
@@ -187,52 +175,43 @@ def save_correction(task_id: int, char_index: int,
                     bbox_pixel: dict | None = None,
                     confidence: float | None = None) -> int:
     """保存单条人工复核修正记录。"""
-    session = _get_session()
     try:
-        corr = ReviewCorrection(
-            task_id=task_id,
-            char_index=char_index,
-            original_char=original_char,
-            original_status=original_status,
-            corrected_char=corrected_char,
-            corrected_status=corrected_status,
-            bbox_pixel=bbox_pixel,
-            confidence=confidence,
-        )
-        session.add(corr)
-        session.commit()
-        return corr.id
+        with _session_scope() as session:
+            corr = ReviewCorrection(
+                task_id=task_id,
+                char_index=char_index,
+                original_char=original_char,
+                original_status=original_status,
+                corrected_char=corrected_char,
+                corrected_status=corrected_status,
+                bbox_pixel=bbox_pixel,
+                confidence=confidence,
+            )
+            session.add(corr)
+            session.flush()
+            return corr.id
     except Exception as e:
-        session.rollback()
         logger.error("保存修正记录失败: %s", e)
         raise
-    finally:
-        session.close()
 
 
 def get_corrections(task_id: int) -> list[ReviewCorrection]:
     """获取某任务的所有复核修正记录。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         return (
             session.query(ReviewCorrection)
             .filter(ReviewCorrection.task_id == task_id)
             .order_by(ReviewCorrection.char_index)
             .all()
         )
-    finally:
-        session.close()
 
 
 def get_all_corrections(limit: int = 1000) -> list[ReviewCorrection]:
     """获取所有修正记录（用于导出训练集）。"""
-    session = _get_session()
-    try:
+    with _session_scope() as session:
         return (
             session.query(ReviewCorrection)
             .order_by(ReviewCorrection.id.desc())
             .limit(limit)
             .all()
         )
-    finally:
-        session.close()

@@ -12,21 +12,18 @@ text_detector 返回的全图 ocr_records（单次 predict() 调用提取），
 """
 
 import logging
+
 import numpy as np
+
+from core.utils import bbox_center, is_chinese_char, point_in_bbox
 
 logger = logging.getLogger("handwriting_recognizer")
 
-# 延迟初始化 PaddleOCR（用于子区域条带识别）
-_SUB_REGION_OCR = None
-
 
 def _get_sub_region_ocr():
-    global _SUB_REGION_OCR
-    if _SUB_REGION_OCR is None:
-        from paddleocr import PaddleOCR
-        _SUB_REGION_OCR = PaddleOCR(lang='ch')
-        logger.info("子区域 OCR 引擎已初始化")
-    return _SUB_REGION_OCR
+    """获取 OCR 引擎 — 复用 text_detector 的单例，避免重复加载模型。"""
+    from core.text_detector import _get_detector
+    return _get_detector()
 
 
 def _ocr_cropped_region(img_array: np.ndarray, bbox: tuple) -> tuple[str, float]:
@@ -42,38 +39,24 @@ def _ocr_cropped_region(img_array: np.ndarray, bbox: tuple) -> tuple[str, float]
 
     cropped = img_array[y0:y2, x0:x2]
     ocr = _get_sub_region_ocr()
-    results = ocr.ocr(cropped, cls=False)
-    if not results or not results[0]:
+    raw_pages = ocr.predict(cropped)
+    if not raw_pages:
         return "", 0.0
 
     texts = []
     scores: list[float] = []
-    for line in results[0]:
-        if line and len(line) >= 2:
-            text, score = line[1]
-            texts.append(text)
-            scores.append(float(score))
+    for page_result in raw_pages:
+        data = getattr(page_result, 'json', None) or {}
+        res = data.get('res')
+        if res is None:
+            continue
+        rec_texts = res.get('rec_texts', []) or []
+        rec_scores = res.get('rec_scores', []) or []
+        for text, score in zip(rec_texts, rec_scores, strict=False):
+            if text:
+                texts.append(text)
+                scores.append(float(score))
     return "".join(texts), max(scores) if scores else 0.0
-
-
-def _bbox_center(bbox: tuple) -> tuple[float, float]:
-    """返回 bbox 中心点 (cx, cy)。"""
-    return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
-
-
-def _point_in_bbox(px: float, py: float, bbox: tuple) -> bool:
-    """判断点 (px, py) 是否在 bbox (x0,y0,x2,y2) 内。"""
-    return bbox[0] <= px <= bbox[2] and bbox[1] <= py <= bbox[3]
-
-
-def _is_chinese_char(ch: str) -> bool:
-    """判断是否为中文字符。"""
-    code = ord(ch)
-    return (
-        0x4E00 <= code <= 0x9FFF
-        or 0x3400 <= code <= 0x4DBF
-        or 0xF900 <= code <= 0xFAFF
-    )
 
 
 def recognize_handwriting(
@@ -128,14 +111,14 @@ def recognize_handwriting(
         if rec.get("page", 0) != page_idx:
             continue
         rec_bbox = rec["rec_bbox"]  # (x0, y0, x1, y1)
-        cx, cy = _bbox_center(rec_bbox)
+        cx, cy = bbox_center(rec_bbox)
 
         # 找包含该中心点的手写框
         best_box = None
         best_idx = -1
         for i, hw_box in enumerate(unmatched_boxes):
             hw_bbox = hw_box["bbox_pixel"]
-            if _point_in_bbox(cx, cy, hw_bbox):
+            if point_in_bbox(cx, cy, hw_bbox):
                 best_box = hw_box
                 best_idx = i
                 break
@@ -187,7 +170,7 @@ def recognize_handwriting(
         rec_score = m["rec_score"]
 
         # 提取中文字符
-        chars = [ch for ch in rec_text if _is_chinese_char(ch)]
+        chars = [ch for ch in rec_text if is_chinese_char(ch)]
         if not chars:
             logger.debug("匹配结果无中文字符: '%s'", rec_text)
             continue

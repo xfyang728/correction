@@ -14,6 +14,8 @@
 import logging
 import re
 
+from core.utils import bbox_center_x, bbox_center_y, bbox_h
+
 logger = logging.getLogger("layout_analyzer")
 
 _QUESTION_PATTERN = re.compile(
@@ -68,16 +70,6 @@ def _question_match(text: str) -> int | None:
     if matched in _CIRCLED_DIGITS:
         return _CIRCLED_DIGITS[matched] - 1 + _QIDX_OFFSET_CIRCLE
     return None
-
-
-def _bbox_h(bbox: tuple) -> int:
-    """返回 bbox 高度。"""
-    return bbox[3] - bbox[1]
-
-
-def _bbox_center_y(bbox: tuple) -> float:
-    """返回 bbox 中心 y。"""
-    return (bbox[1] + bbox[3]) / 2.0
 
 
 def analyze_layout(
@@ -148,7 +140,7 @@ def analyze_layout(
     for box in det_boxes:
         bbox = box["bbox_pixel"]
         conf = box.get("confidence", 0.9)
-        h = _bbox_h(bbox)
+        h = bbox_h(bbox)
 
         # ---- 分类逻辑（基于 bbox 高度 + 题号标记反向纠正） ----
         # 【关键修复】包含题号标记的框一定是印刷体，无论高度多少
@@ -201,7 +193,7 @@ def analyze_layout(
     sub_region_count = 0
     for pb in printed_boxes:
         bbox = pb["bbox_pixel"]
-        h = _bbox_h(bbox)
+        h = bbox_h(bbox)
         if h < _SUB_REGION_HEIGHT_MIN:
             continue
         # 检查是否包含题号（中心点落在某题号标记框内）
@@ -248,11 +240,6 @@ def analyze_layout(
 _COLUMN_GAP_THRESHOLD = 150
 
 
-def _bbox_center_x(bbox: tuple) -> float:
-    """返回 bbox 中心 x。"""
-    return (bbox[0] + bbox[2]) / 2.0
-
-
 def _detect_questions_from_boxes(
     printed_boxes: list[dict], img_h: int, page_idx: int,
     ocr_records: list[dict] | None = None,
@@ -283,8 +270,8 @@ def _detect_questions_from_boxes(
             bbox = rec.get("rec_bbox")
             if not bbox:
                 continue
-            cy = _bbox_center_y(bbox)
-            cx = _bbox_center_x(bbox)
+            cy = bbox_center_y(bbox)
+            cx = bbox_center_x(bbox)
             markers.append({
                 "q_idx": q,
                 "marker_bbox": bbox,
@@ -297,17 +284,17 @@ def _detect_questions_from_boxes(
         logger.warning("第 %d 页: 未从 OCR 文本中检测到题号，回退到位置推断", page_idx + 1)
         # 回退：按印刷体框 y 顺序分配题号
         sorted_boxes = sorted(
-            printed_boxes, key=lambda r: _bbox_center_y(r["bbox_pixel"])
+            printed_boxes, key=lambda r: bbox_center_y(r["bbox_pixel"])
         )
         for i, box in enumerate(sorted_boxes):
             bbox = box["bbox_pixel"]
-            cy = _bbox_center_y(bbox)
+            cy = bbox_center_y(bbox)
             markers.append({
                 "q_idx": i,
                 "marker_bbox": bbox,
                 "marker_text": f"({i + 1})",
                 "y_center": cy,
-                "x_center": _bbox_center_x(bbox),
+                "x_center": bbox_center_x(bbox),
             })
     else:
         logger.info(
@@ -428,14 +415,14 @@ def _assign_to_handwriting(
     for r in question_regions:
         qi = r["q_idx"]
         if qi not in marker_y_map:
-            marker_y_map[qi] = _bbox_center_y(r["marker_bbox"])
+            marker_y_map[qi] = bbox_center_y(r["marker_bbox"])
         else:
-            marker_y_map[qi] = min(marker_y_map[qi], _bbox_center_y(r["marker_bbox"]))
+            marker_y_map[qi] = min(marker_y_map[qi], bbox_center_y(r["marker_bbox"]))
 
     for box in handwriting_boxes:
         bbox = box["bbox_pixel"]
-        cx = _bbox_center_x(bbox)
-        cy = _bbox_center_y(bbox)
+        cx = bbox_center_x(bbox)
+        cy = bbox_center_y(bbox)
         matched = None
 
         # ---- 策略1：列感知匹配 ----
@@ -445,14 +432,12 @@ def _assign_to_handwriting(
             col_candidates.setdefault(col, []).append(r)
 
         best_col = _find_column_for_box(cx, col_candidates, question_regions)
-        matched_col: int | None = None  # 记录列内匹配的题号
 
         if best_col is not None:
             col_regions = col_candidates[best_col]
             for r in sorted(col_regions, key=lambda x: x["y_start"]):
                 if r["y_start"] <= cy < r["y_end"]:
                     matched = r["q_idx"]
-                    matched_col = best_col
                     break
 
         # ---- 策略2：跨列 y 距离极近纠正 ----
@@ -506,7 +491,7 @@ def _find_column_for_box(
     col_x_avgs: dict[int, float] = {}
 
     for col_idx, regions in col_candidates.items():
-        x_centers = [_bbox_center_x(r["marker_bbox"]) for r in regions]
+        x_centers = [bbox_center_x(r["marker_bbox"]) for r in regions]
         if not x_centers:
             continue
         col_x_ranges[col_idx] = (min(x_centers), max(x_centers))
@@ -531,21 +516,3 @@ def _find_column_for_box(
         return None
 
     return best_col
-
-
-# ============================================================
-#  向后兼容接口 — 供 processor.py 过渡期使用
-# ============================================================
-
-def extract_student_answers(
-    ocr_results: list[dict],
-    raw_lines: list[dict] | None = None,
-    img_w: int = 0,
-    img_h: int = 0,
-) -> tuple[list[dict], dict[int, list[dict]]]:
-    """兼容旧接口 — 返回空列表，提醒使用新流水线。"""
-    logger.warning(
-        "extract_student_answers() 已被新三阶段流水线取代。"
-        "请使用: detect_text() → analyze_layout() → recognize_handwriting()"
-    )
-    return [], {}

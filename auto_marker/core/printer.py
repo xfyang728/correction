@@ -32,8 +32,10 @@ def print_pdf(pdf_path: str, printer_name: str | None = None) -> bool:
 
     try:
         if printer_name:
+            # 使用 printto verb 指定打印机
             cmd = ["powershell", "-Command",
-                   f'Start-Process -FilePath "{path}" -Verb Print -PassThru '
+                   f'Start-Process -FilePath "{path}" -Verb PrintTo '
+                   f'-ArgumentList \'"{printer_name}"\' -PassThru '
                    f'| ForEach-Object {{$_.CloseMainWindow()}}']
         else:
             # 使用系统默认打印机

@@ -210,7 +210,7 @@ def main() -> None:
     # 打印启动信息
     local_ip = args.host if args.host != "0.0.0.0" else "127.0.0.1"
     print("-" * 50)
-    print(f"  FTP 服务器已启动")
+    print("  FTP 服务器已启动")
     print(f"  地址:      {args.host}:{args.port}")
     print(f"  共享目录:  {share_dir}")
     print(f"  匿名模式:  {'是' if anonymous else '否'}")
@@ -254,7 +254,7 @@ def run_ftp_server(
 
     handler = CustomFTPHandler
     handler.authorizer = authorizer
-    handler.banner = banner or f"Welcome to Simple FTP Server"
+    handler.banner = banner or "Welcome to Simple FTP Server"
 
     if passive_ports:
         low, high = passive_ports

@@ -3,6 +3,7 @@
 """
 
 import logging
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -44,11 +45,12 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     # 0. 低分辨率检测 & 上采样
     h, w = gray.shape[:2]
     if min(h, w) < LOW_RES_THRESHOLD:
+        h_orig, w_orig = h, w
         scale = LOW_RES_THRESHOLD / min(h, w)
         new_w, new_h = int(w * scale), int(h * scale)
         gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         h, w = gray.shape[:2]
-        logger.info("低分辨率图像 %dx%d → 上采样到 %dx%d", w_orig := w, h_orig := h, new_w, new_h)
+        logger.info("低分辨率图像 %dx%d → 上采样到 %dx%d", w_orig, h_orig, new_w, new_h)
 
     # 1. 去噪 — 中值滤波
     denoised = cv2.medianBlur(gray, 3)

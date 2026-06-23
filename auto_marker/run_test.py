@@ -58,7 +58,7 @@ def run_pipeline(pdf_name: str):
     process_pdf(str(incoming))
 
     print(f"\n{'='*50}")
-    print(f"✅ 处理完成，请查看 data/output/ 目录")
+    print("✅ 处理完成，请查看 data/output/ 目录")
     print(f"{'='*50}")
 
 
@@ -83,12 +83,12 @@ def show_results():
     if output_dir.exists():
         pdfs = list(output_dir.glob("*_annotated.pdf"))
         if pdfs:
-            print(f"\n📄 批注 PDF 已生成:")
+            print("\n📄 批注 PDF 已生成:")
             for p in pdfs:
                 size = p.stat().st_size / 1024
                 print(f"   {p.name} ({size:.1f} KB)")
         else:
-            print(f"\n📄 output/ 目录无批注 PDF")
+            print("\n📄 output/ 目录无批注 PDF")
 
 
 def main():
@@ -120,8 +120,8 @@ def main():
     # 显示结果
     show_results()
 
-    print(f"\n💡 提示: Web 管理界面已启动 → http://localhost:8501")
-    print(f"   批注 PDF 保存在: data/output/")
+    print("\n💡 提示: Web 管理界面已启动 → http://localhost:8501")
+    print("   批注 PDF 保存在: data/output/")
 
 
 if __name__ == "__main__":

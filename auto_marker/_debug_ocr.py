@@ -1,10 +1,14 @@
 """调试脚本 — 查看OCR识别文本"""
-import sys, numpy as np
+import sys
 from pathlib import Path
+
+import numpy as np
+
 sys.path.insert(0, str(Path('.').resolve()))
-from core.text_detector import detect_text
 import fitz
 from PIL import Image
+
+from core.text_detector import detect_text
 
 pdf_path = '301_2026-06-18_003.pdf'
 doc = fitz.open(pdf_path)
@@ -24,6 +28,7 @@ for i, r in enumerate(ocr_records):
 print()
 print('=== 打印det_boxes高度分类 ===')
 from core.layout_analyzer import analyze_layout
+
 layout = analyze_layout(det_boxes, np.array(img).shape[0], 0,
                         ocr_records=ocr_records)  # 传入ocr_records
 for i, r in enumerate(layout['printed_boxes']):

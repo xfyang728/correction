@@ -10,21 +10,26 @@ PaddleOCR 3.7 的 predict() 同时返回检测和识别结果。
 """
 
 import logging
+import threading
+
 import numpy as np
 
 logger = logging.getLogger("text_detector")
 
 _det_instance = None
+_det_lock = threading.Lock()
 
 
 def _get_detector():
-    """获取或初始化 PaddleOCR 引擎单例。"""
+    """获取或初始化 PaddleOCR 引擎单例（线程安全）。"""
     global _det_instance
     if _det_instance is None:
-        from paddleocr import PaddleOCR
+        with _det_lock:
+            if _det_instance is None:  # double-check
+                from paddleocr import PaddleOCR
 
-        _det_instance = PaddleOCR(lang='ch')
-        logger.info("文本检测器就绪（PaddleOCR 3.7, PP-OCRv6 Medium）")
+                _det_instance = PaddleOCR(lang='ch')
+                logger.info("文本检测器就绪（PaddleOCR 3.7, PP-OCRv6 Medium）")
     return _det_instance
 
 

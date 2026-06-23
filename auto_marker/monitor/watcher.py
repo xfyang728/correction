@@ -4,16 +4,16 @@
 核心设计：ThreadPoolExecutor + 文件稳定检测。
 """
 
+import configparser
+import logging
 import os
 import sys
 import time
-import logging
-import configparser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 # 确保项目根目录在 sys.path 中
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,20 +88,41 @@ def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg_path = ROOT / "config.ini"
     if cfg_path.exists():
-        with open(str(cfg_path), "r", encoding="utf-8") as f:
+        with open(str(cfg_path), encoding="utf-8") as f:
             cfg.read_file(f)
     return cfg
 
 
 # ---- 日志设置 ----
 
+class JsonFormatter(logging.Formatter):
+    """JSON 结构化日志格式，便于机器解析和监控告警。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+        log_entry = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
 def setup_logging(cfg: configparser.ConfigParser):
     level = getattr(logging, cfg.get("log", "level", fallback="INFO").upper(), logging.INFO)
     log_dir = ROOT / (cfg.get("log", "dir", fallback="data/logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
+    use_json = cfg.getboolean("log", "json", fallback=False)
 
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
+    if use_json:
+        fmt = JsonFormatter()
+        fmt.datefmt = "%Y-%m-%d %H:%M:%S"
+    else:
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                datefmt="%Y-%m-%d %H:%M:%S")
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
@@ -114,10 +135,12 @@ def setup_logging(cfg: configparser.ConfigParser):
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    # 控制台 handler
+    # 控制台 handler（始终用文本格式，便于人工阅读）
+    text_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                 datefmt="%Y-%m-%d %H:%M:%S")
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(level)
-    ch.setFormatter(fmt)
+    ch.setFormatter(text_fmt)
     root.addHandler(ch)
 
     return level
@@ -151,7 +174,8 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在关闭...")
         observer.stop()
-        executor.shutdown(wait=False)
+        logger.info("等待在途任务完成...")
+        executor.shutdown(wait=True)
     observer.join()
     logger.info("监控服务已关闭")
 

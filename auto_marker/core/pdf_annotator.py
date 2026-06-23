@@ -14,8 +14,8 @@ import logging
 from pathlib import Path
 
 import pdfplumber
-from reportlab.pdfgen import canvas
 from PyPDF2 import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
 
 logger = logging.getLogger("annotator")
 
@@ -194,7 +194,7 @@ def annotate(original_pdf: str, graded_results: list[dict],
 
             # ---- 按题模式：绘制题号旁的绿色大对号 ----
             if use_question_mode:
-                for q_idx, q_data in question_summary[page_num].items():
+                for _q_idx, q_data in question_summary[page_num].items():
                     if not q_data["all_correct"]:
                         continue
                     marker_bbox = q_data.get("marker_bbox")

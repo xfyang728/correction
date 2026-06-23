@@ -2,9 +2,9 @@
 Streamlit 管理界面 — 统计看板、任务管理、答案管理、系统配置。
 """
 
-import sys
-import json
 import configparser
+import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -14,19 +14,33 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from db.crud import (
-    get_tasks,
-    get_task,
-    save_answer,
-    get_answer,
-    get_all_answers,
-    delete_answer,
-    update_task_result,
-    save_correction,
-    get_corrections,
-)
+from services.answer_service import AnswerService  # noqa: E402
+from services.task_service import TaskService  # noqa: E402
 
 st.set_page_config(page_title="半自动批改台", layout="wide", page_icon="📝")
+
+# ============================================================
+#  密码保护（如果 config.ini 中设置了 password）
+# ============================================================
+
+_cfg = configparser.ConfigParser()
+_cfg.read(ROOT / "config.ini", encoding="utf-8")
+_web_password = _cfg.get("web", "password", fallback="")
+
+if _web_password:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        st.title("📝 半自动批改台 — 登录")
+        pwd = st.text_input("请输入密码", type="password")
+        if st.button("登录", type="primary"):
+            if pwd == _web_password:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("密码错误")
+        st.stop()
+
 st.title("📝 半自动批改台")
 
 # ============================================================
@@ -85,7 +99,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
 )
 
 with tab1:
-    tasks = get_tasks(limit=500)
+    tasks = TaskService.get_tasks(limit=500)
     if not tasks:
         st.info("暂无任务数据")
     else:
@@ -168,7 +182,7 @@ with tab2:
     st.subheader("批改任务")
 
     # ── 加载全部（用于筛选） ──
-    all_tasks = get_tasks(limit=1000)
+    all_tasks = TaskService.get_tasks(limit=1000)
     if not all_tasks:
         st.info("暂无任务数据")
     else:
@@ -227,7 +241,7 @@ with tab2:
 
         if selected_label != "(请选择)":
             task_id = opts[selected_label]
-            task = get_task(task_id)
+            task = TaskService.get_task(task_id)
             if not task:
                 st.warning(f"任务 #{task_id} 不存在")
             else:
@@ -325,6 +339,14 @@ with tab2:
                         hide_index=True,
                     )
 
+                    # ── 过滤当前页结果（在按题统计之前完成） ──
+                    page_results = [r for r in results if r["page"] == page_sel]
+                    page_all_results = page_results  # 保存过滤前的全量结果（用于按题统计）
+                    if status_filter != "全部":
+                        page_results = [
+                            r for r in page_results if r["status"] == status_filter
+                        ]
+
                     # ── 每页按题统计 ──
                     st.divider()
                     st.subheader("📝 每页按题统计")
@@ -370,14 +392,6 @@ with tab2:
                     else:
                         st.caption("该页无按题分组数据（可能无题号识别结果）")
 
-                    # 过滤
-                    page_results = [r for r in results if r["page"] == page_sel]
-                    page_all_results = page_results  # 保存过滤前的全量结果（用于按题统计）
-                    if status_filter != "全部":
-                        page_results = [
-                            r for r in page_results if r["status"] == status_filter
-                        ]
-
                     if page_results:
                         emoji_map = {
                             "correct": "✅",
@@ -393,7 +407,7 @@ with tab2:
                         if review_mode:
                             st.warning("复核模式已开启。修改下方下拉框后请点击保存按钮。")
                             modified = []
-                            for i, r in enumerate(page_results):
+                            for _i, r in enumerate(page_results):
                                 # 找到在完整 results 中的索引
                                 global_idx = results.index(r)
                                 col_e1, col_e2, col_e3, col_e4 = st.columns([1, 1, 1, 2])
@@ -418,7 +432,7 @@ with tab2:
                                         old_status = orig_r["status"]
                                         results[global_idx]["status"] = new_status
                                         # 保存修正记录
-                                        save_correction(
+                                        TaskService.save_correction(
                                             task_id=task.id,
                                             char_index=global_idx,
                                             original_char=orig_r["char"],
@@ -429,7 +443,7 @@ with tab2:
                                             confidence=orig_r.get("confidence"),
                                         )
                                     # 更新任务
-                                    update_task_result(task.id, results, review_done=True)
+                                    TaskService.update_task_result(task.id, results, review_done=True)
                                     st.success(f"已保存 {len(modified)} 处修改，任务 #{task.id} 标记为已复核")
                                     st.rerun()
                             else:
@@ -470,7 +484,7 @@ with tab3:
     with col_a2:
         date_str = st.text_input("日期 (YYYY-MM-DD)", value="", key="ans_date")
 
-    current = get_answer(cls_name if cls_name else None, date_str if date_str else None)
+    current = AnswerService.get_answer(cls_name if cls_name else None, date_str if date_str else None)
     answer_text = st.text_area(
         "答案内容（每行一个字/词，或连续文本）",
         value=current or "",
@@ -481,7 +495,7 @@ with tab3:
 
     if st.button("保存答案", type="primary", use_container_width=True):
         if answer_text.strip():
-            save_answer(cls_name, date_str, answer_text.strip())
+            AnswerService.save_answer(cls_name, date_str, answer_text.strip())
             st.success(f"答案已保存（班级={cls_name}, 日期={date_str})")
             st.rerun()
         else:
@@ -491,7 +505,7 @@ with tab3:
     st.divider()
     st.subheader("已有答案记录")
 
-    all_answers = get_all_answers()
+    all_answers = AnswerService.get_all_answers()
     if not all_answers:
         st.info("暂无答案记录")
     else:
@@ -517,7 +531,7 @@ with tab3:
         if del_label != "(请选择)":
             del_id = del_opts[del_label]
             if st.button(f"🗑️ 删除答案 #{del_id}", type="secondary", use_container_width=True):
-                if delete_answer(del_id):
+                if AnswerService.delete_answer(del_id):
                     st.success(f"答案 #{del_id} 已删除")
                     st.rerun()
                 else:

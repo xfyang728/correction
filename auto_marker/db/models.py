@@ -3,7 +3,8 @@
 """
 
 import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, Text, Boolean
+
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
