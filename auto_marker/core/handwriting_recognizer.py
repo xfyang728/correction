@@ -12,8 +12,48 @@ text_detector 返回的全图 ocr_records（单次 predict() 调用提取），
 """
 
 import logging
+import numpy as np
 
 logger = logging.getLogger("handwriting_recognizer")
+
+# 延迟初始化 PaddleOCR（用于子区域条带识别）
+_SUB_REGION_OCR = None
+
+
+def _get_sub_region_ocr():
+    global _SUB_REGION_OCR
+    if _SUB_REGION_OCR is None:
+        from paddleocr import PaddleOCR
+        _SUB_REGION_OCR = PaddleOCR(lang='ch')
+        logger.info("子区域 OCR 引擎已初始化")
+    return _SUB_REGION_OCR
+
+
+def _ocr_cropped_region(img_array: np.ndarray, bbox: tuple) -> tuple[str, float]:
+    """对裁剪的子图区域运行 OCR，返回 (识别文本, 最高置信度)。"""
+    x0, y0, x2, y2 = bbox
+    h, w = img_array.shape[:2]
+    x0 = max(0, int(x0))
+    y0 = max(0, int(y0))
+    x2 = min(w, int(x2))
+    y2 = min(h, int(y2))
+    if x2 <= x0 or y2 <= y0:
+        return "", 0.0
+
+    cropped = img_array[y0:y2, x0:x2]
+    ocr = _get_sub_region_ocr()
+    results = ocr.ocr(cropped, cls=False)
+    if not results or not results[0]:
+        return "", 0.0
+
+    texts = []
+    scores: list[float] = []
+    for line in results[0]:
+        if line and len(line) >= 2:
+            text, score = line[1]
+            texts.append(text)
+            scores.append(float(score))
+    return "".join(texts), max(scores) if scores else 0.0
 
 
 def _bbox_center(bbox: tuple) -> tuple[float, float]:
@@ -114,6 +154,27 @@ def recognize_handwriting(
         "第 %d 页: %d 个手写区域, 匹配到 %d 条识别记录, %d 个未匹配",
         page_idx + 1, len(handwriting_boxes), len(matched), len(unmatched_boxes),
     )
+
+    # ---- Step 1.5: 对未匹配的合成条带运行 OCR ----
+    # 这些条带来自 printed_question 框底部，没有现成的 OCR 记录与之匹配
+    for hw_box in list(unmatched_boxes):
+        if not hw_box.get("is_sub_region"):
+            continue
+        bbox = hw_box["bbox_pixel"]
+        logger.debug("对未匹配子区域条带运行 OCR: %s", bbox)
+        text, score = _ocr_cropped_region(img, bbox)
+        if not text:
+            logger.debug("子区域条带 OCR 无结果: %s", bbox)
+            continue
+        # 创建一个合成 OCR 记录添加到 matched
+        matched.append({
+            "handwriting_box": hw_box,
+            "rec_text": text,
+            "rec_score": score,
+            "rec_bbox": bbox,
+        })
+        unmatched_boxes = [b for b in unmatched_boxes if b is not hw_box]
+        logger.debug("子区域条带 OCR 结果: '%s' (score=%.3f)", text, score)
 
     # ---- Step 2: 将匹配结果切分为单字 ----
     all_results: list[dict] = []

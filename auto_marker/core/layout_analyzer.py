@@ -125,13 +125,36 @@ def analyze_layout(
     printed_boxes: list[dict] = []
     all_regions: list[dict] = []
 
+    # ---- 预检测含题号的 OCR 记录（这些一定是印刷体，不应进入 handwriting） ----
+    # 构建 question-marker bbox 列表，用于分类时反向纠正
+    _question_marker_bboxes: list[tuple] = []
+    if ocr_records:
+        for rec in ocr_records:
+            text = rec.get("rec_text", "")
+            if _question_match(text) is not None:
+                bbox_m = rec.get("rec_bbox")
+                if bbox_m:
+                    _question_marker_bboxes.append(bbox_m)
+
+    def _overlaps_with_question_marker(det_bbox: tuple) -> bool:
+        """检查 det_bbox 中心是否落在某个题号标记框内（中心点包含判定，比面积重叠更精确）。"""
+        dcx = (det_bbox[0] + det_bbox[2]) / 2.0
+        dcy = (det_bbox[1] + det_bbox[3]) / 2.0
+        for qm in _question_marker_bboxes:
+            if qm[0] <= dcx <= qm[2] and qm[1] <= dcy <= qm[3]:
+                return True
+        return False
+
     for box in det_boxes:
         bbox = box["bbox_pixel"]
         conf = box.get("confidence", 0.9)
         h = _bbox_h(bbox)
 
-        # ---- 分类逻辑（基于 bbox 高度） ----
-        if h >= HANDWRITTEN_HEIGHT_MIN:
+        # ---- 分类逻辑（基于 bbox 高度 + 题号标记反向纠正） ----
+        # 【关键修复】包含题号标记的框一定是印刷体，无论高度多少
+        has_question_marker = _overlaps_with_question_marker(bbox)
+
+        if h >= HANDWRITTEN_HEIGHT_MIN and not has_question_marker:
             region_type = "handwriting"
             handwriting_boxes.append({
                 "page": page_idx,
@@ -139,7 +162,7 @@ def analyze_layout(
                 "confidence": conf,
                 "type": "handwriting",
             })
-        elif h <= PINYIN_HEIGHT_MAX:
+        elif h <= PINYIN_HEIGHT_MAX and not has_question_marker:
             region_type = "pinyin_hint"
             printed_boxes.append({
                 "page": page_idx,
@@ -170,6 +193,40 @@ def analyze_layout(
         sum(1 for r in printed_boxes if r["type"] == "printed_question"),
         sum(1 for r in printed_boxes if r["type"] == "pinyin_hint"),
     )
+
+    # ---- 从含题号的印刷体框中提取手写条带 ----
+    # 子题(1)-(7)的填空答案与被检测框合并，裁剪底部区域恢复手写
+    _SUB_REGION_HEIGHT_MIN = 130  # 最小高度，低于此值不包含手写
+    _SUB_REGION_RATIO = 0.55      # 取框底部 55%（跳过顶部印刷文字）
+    sub_region_count = 0
+    for pb in printed_boxes:
+        bbox = pb["bbox_pixel"]
+        h = _bbox_h(bbox)
+        if h < _SUB_REGION_HEIGHT_MIN:
+            continue
+        # 检查是否包含题号（中心点落在某题号标记框内）
+        if not _overlaps_with_question_marker(bbox):
+            continue
+        # 创建底部手写条带
+        x0, y0, x2, y2 = bbox
+        strip_y0 = int(y2 - h * _SUB_REGION_RATIO)
+        if strip_y0 <= y0:
+            strip_y0 = y0 + int(h * 0.3)  # 至少跳过顶部30%
+        strip_bbox = (x0, strip_y0, x2, y2)
+        handwriting_boxes.append({
+            "page": page_idx,
+            "bbox_pixel": strip_bbox,
+            "confidence": pb.get("confidence", 0.9),
+            "type": "handwriting",
+            "is_sub_region": True,
+        })
+        sub_region_count += 1
+
+    if sub_region_count:
+        logger.info(
+            "第 %d 页: 从印刷体框中提取 %d 个手写条带",
+            page_idx + 1, sub_region_count,
+        )
 
     # ---- 题目序号检测（从 OCR 记录中匹配文本） ----
     question_regions = _detect_questions_from_boxes(
