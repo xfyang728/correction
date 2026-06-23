@@ -18,6 +18,13 @@ from core.utils import bbox_center_x, bbox_center_y, bbox_h
 
 logger = logging.getLogger("layout_analyzer")
 
+# "看拼音写词语"等逐字标记题型的关键词
+# 命中这些关键词的区间内的题目将使用逐字标记模式
+_PER_CHAR_KEYWORDS = ["看拼音", "写词语"]
+# 其他常见题型标题（用于界定"看拼音写词语"区间的结束）
+_OTHER_SECTION_KEYWORDS = ["选词填空", "比一比", "照样子", "阅读", "组词",
+                           "填空", "连线", "判断", "选择", "修改", "按要求"]
+
 _QUESTION_PATTERN = re.compile(
     r'[（(](\d+)[)）]'      # (1) / （1）— 子题号
     r'|[①②③④⑤⑥⑦⑧⑨⑩]'  # 带圈数字
@@ -318,6 +325,9 @@ def _detect_questions_from_boxes(
     # ---- 每列内按 y 排序构建区间 ----
     regions = _build_column_intervals(columns, img_h)
 
+    # ---- 检测"看拼音写词语"等逐字标记题型 ----
+    _mark_per_char_questions(regions, ocr_records, page_idx)
+
     logger.debug(
         "第 %d 页: 推断 %d 道题（%d 列）",
         page_idx + 1,
@@ -361,6 +371,70 @@ def _split_into_columns(markers: list[dict]) -> list[list[dict]]:
         sorted_by_x[: split_idx + 1],
         sorted_by_x[split_idx + 1:],
     ]
+
+
+def _mark_per_char_questions(
+    regions: list[dict],
+    ocr_records: list[dict] | None,
+    page_idx: int,
+) -> None:
+    """检测"看拼音写词语"等逐字标记题型，为对应 region 添加 question_type 字段。
+
+    算法：
+        1. 扫描 OCR 文本，找到"看拼音"/"写词语"关键词的 y 位置（区间起点）
+        2. 找到下一个其他题型标题的 y 位置（区间终点）
+        3. y 在该区间内的 region 标记为 question_type="per_char"
+
+    未命中的 region 默认 question_type="default"。
+    """
+    # 初始化所有 region 的 question_type
+    for r in regions:
+        r["question_type"] = "default"
+
+    if not ocr_records:
+        return
+
+    # 收集所有 section header 的 y 位置
+    per_char_ys: list[float] = []  # "看拼音写词语" 标题的 y 位置
+    other_section_ys: list[float] = []  # 其他题型标题的 y 位置
+
+    for rec in ocr_records:
+        text = rec.get("rec_text", "")
+        bbox = rec.get("rec_bbox")
+        if not bbox:
+            continue
+        cy = bbox_center_y(bbox)
+        if any(kw in text for kw in _PER_CHAR_KEYWORDS):
+            per_char_ys.append(cy)
+        elif any(kw in text for kw in _OTHER_SECTION_KEYWORDS):
+            other_section_ys.append(cy)
+
+    if not per_char_ys:
+        return
+
+    # 对每个"看拼音"标题，找到其覆盖的 y 区间
+    per_char_ranges: list[tuple[float, float]] = []
+    for start_y in per_char_ys:
+        # 找 start_y 之后的最近一个其他题型标题作为终点
+        end_candidates = [y for y in other_section_ys if y > start_y]
+        end_y = min(end_candidates) if end_candidates else float("inf")
+        per_char_ranges.append((start_y, end_y))
+
+    # 标记落在 per_char 区间内的 region
+    count = 0
+    for r in regions:
+        marker_cy = bbox_center_y(r["marker_bbox"])
+        for start_y, end_y in per_char_ranges:
+            if start_y <= marker_cy < end_y:
+                r["question_type"] = "per_char"
+                count += 1
+                break
+
+    if count > 0:
+        logger.info(
+            "第 %d 页: 检测到 %d 道逐字标记题（看拼音写词语）",
+            page_idx + 1, count,
+        )
 
 
 def _build_column_intervals(

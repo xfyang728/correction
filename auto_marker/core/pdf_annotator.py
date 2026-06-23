@@ -101,10 +101,17 @@ def annotate(original_pdf: str, graded_results: list[dict],
     # 构建快速查找: 哪些 question_idx 是全部正确的
     # {page: {q_idx: True/False}}
     all_correct_map: dict[int, set[int]] = {}
+    # 逐字标记题（看拼音写词语等）: {page: set[q_idx]}
+    per_char_map: dict[int, set[int]] = {}
     if question_summary:
         for page_idx, questions in question_summary.items():
             all_correct_map[page_idx] = {
-                q_idx for q_idx, qs in questions.items() if qs["all_correct"]
+                q_idx for q_idx, qs in questions.items()
+                if qs["all_correct"] and qs.get("question_type", "default") != "per_char"
+            }
+            per_char_map[page_idx] = {
+                q_idx for q_idx, qs in questions.items()
+                if qs.get("question_type") == "per_char"
             }
 
     with pdfplumber.open(original_pdf) as pdf:
@@ -132,6 +139,8 @@ def annotate(original_pdf: str, graded_results: list[dict],
 
             # 找出本页全部正确的题号集合
             page_correct_questions = all_correct_map.get(page_num, set())
+            # 本页逐字标记题集合（看拼音写词语等）
+            page_per_char_questions = per_char_map.get(page_num, set())
 
             for r in page_results:
                 bbox = r["bbox_pixel"]
@@ -170,8 +179,18 @@ def annotate(original_pdf: str, graded_results: list[dict],
                 # 半径上下限：8~18pt
                 mark_r = max(min(mark_r, 18), 8)
 
+                # ---- 逐字标记题（看拼音写词语等）----
+                # 无论对错都逐字标记：正确画小绿勾，错误画红圈，存疑画橙三角
+                if q_idx is not None and q_idx in page_per_char_questions:
+                    if status == "wrong":
+                        _draw_wrong_circle(can, x_page, y_page, mark_r, conf)
+                    elif status == "uncertain":
+                        _draw_uncertain_triangle(can, x_page, y_page, mark_r)
+                    else:
+                        _draw_checkmark(can, x_page, y_page, mark_r * 0.7)
+
                 # ---- 按题模式 ----
-                if use_question_mode:
+                elif use_question_mode:
                     # 如果这个字属于全部正确的题 → 跳过逐字标记（题号旁已画大绿✓）
                     if q_idx is not None and q_idx in page_correct_questions:
                         continue
@@ -193,9 +212,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
                         _draw_checkmark(can, x_page, y_page, mark_r * 0.7)
 
             # ---- 按题模式：绘制题号旁的绿色大对号 ----
+            # 跳过逐字标记题（per_char 题即使全对也不画大绿✓，而是逐字画小绿勾）
             if use_question_mode:
                 for _q_idx, q_data in question_summary[page_num].items():
                     if not q_data["all_correct"]:
+                        continue
+                    if q_data.get("question_type") == "per_char":
                         continue
                     marker_bbox = q_data.get("marker_bbox")
                     if not marker_bbox:

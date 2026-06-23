@@ -66,4 +66,4 @@ def init_db(db_path: str = "data/marker.db"):
     """初始化数据库，返回 Session 类。"""
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)

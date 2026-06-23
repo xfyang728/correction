@@ -200,10 +200,16 @@ def summarize_by_question(graded: list[dict],
     """
     from collections import defaultdict
 
-    # 构建题号位置查找表: {page_idx: {q_idx: marker_bbox}}
+    # 构建题号位置查找表: {page_idx: {q_idx: {marker_bbox, question_type}}}
     marker_map: dict[int, dict] = {}
     for page_idx, regions in question_regions.items():
-        marker_map[page_idx] = {r["q_idx"]: r["marker_bbox"] for r in regions}
+        marker_map[page_idx] = {
+            r["q_idx"]: {
+                "marker_bbox": r["marker_bbox"],
+                "question_type": r.get("question_type", "default"),
+            }
+            for r in regions
+        }
 
     # 按 (page, question_idx) 分组
     groups: dict[tuple[int, int], list[dict]] = defaultdict(list)
@@ -223,7 +229,9 @@ def summarize_by_question(graded: list[dict],
         if page_idx not in result:
             result[page_idx] = {}
 
-        marker_bbox = marker_map.get(page_idx, {}).get(q_idx)
+        marker_info = marker_map.get(page_idx, {}).get(q_idx, {})
+        marker_bbox = marker_info.get("marker_bbox")
+        question_type = marker_info.get("question_type", "default")
         result[page_idx][q_idx] = {
             "total": total,
             "correct": correct,
@@ -231,6 +239,7 @@ def summarize_by_question(graded: list[dict],
             "wrong": wrong,
             "all_correct": correct == total and total > 0,
             "marker_bbox": marker_bbox,
+            "question_type": question_type,
         }
 
     # 统计日志
