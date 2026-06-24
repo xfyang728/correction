@@ -209,6 +209,13 @@ def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = 
                 }],
                 "max_tokens": 1024,
                 "temperature": 0.1,
+                "repeat_penalty": 1.1,
+                "repeat_last_n": 64,
+                "top_k": 40,
+                "top_p": 0.95,
+                "min_p": 0.05,
+                "frequency_penalty": 0.0,
+                "presence_penalty": 0.0,
             },
             timeout=QWEN_VL_TIMEOUT,
         )
@@ -229,6 +236,7 @@ def _parse_page_level_response(response: str) -> list[dict]:
     import re
 
     results: list[dict] = []
+    last_q_num = 0  # 记录上一个题号，用于判断是否重复
 
     for line in response.strip().split("\n"):
         line = line.strip()
@@ -238,34 +246,58 @@ def _parse_page_level_response(response: str) -> list[dict]:
         # 匹配新格式: (1) 学生答案 | 正确/错误 | 错误说明
         m = re.match(r"[（(](\d+)[)）]\s*(.+?)\s*\|\s*(正确|错误)\s*\|\s*(.*)", line)
         if m:
+            q_num = int(m.group(1))
             answer = m.group(2).strip()
             is_correct = m.group(3) == "正确"
             error = m.group(4).strip() if m.group(4) else ""
             # 过滤"未作答"
             if "未作答" not in answer:
+                # 检测题号是否重复（如拼音填空的①②被识别成(1)(2)）
+                if q_num <= last_q_num:
+                    # 题号重复，说明是新的题型，重置题号
+                    q_num = last_q_num + 1
                 results.append({
                     "answer": answer,
                     "correct": is_correct,
                     "error": error,
                 })
+                last_q_num = q_num
             continue
 
         # 兼容旧格式：只提取答案文本
         # 去除题号前缀
-        m = re.match(r"[（(]\d+[)）]\s*(.+)", line)
+        m = re.match(r"[（(](\d+)[)）]\s*(.+)", line)
         if m:
-            results.append({"answer": m.group(1).strip(), "correct": None, "error": ""})
+            q_num = int(m.group(1))
+            answer = m.group(2).strip()
+            # 检测题号是否重复
+            if q_num <= last_q_num:
+                q_num = last_q_num + 1
+            results.append({"answer": answer, "correct": None, "error": ""})
+            last_q_num = q_num
             continue
 
         m = re.match(r"[①②③④⑤⑥⑦⑧⑨⑩]\s*[.、]?\s*(.+)", line)
         if m:
             results.append({"answer": m.group(1).strip(), "correct": None, "error": ""})
+            last_q_num += 1
             continue
 
         m = re.match(r"\d+\s*[.、]\s*(.+)", line)
         if m:
             results.append({"answer": m.group(1).strip(), "correct": None, "error": ""})
+            last_q_num += 1
             continue
+
+        # 无题号行：如果是汉字内容且长度合理，追加到上一个答案
+        chinese_chars = [ch for ch in line if is_chinese_char(ch)]
+        if len(chinese_chars) >= 2 and len(line) < 30:
+            if results:
+                # 追加到上一个答案
+                results[-1]["answer"] += line
+            else:
+                results.append({"answer": line, "correct": None, "error": ""})
+                last_q_num += 1
 
     # 拆分包含空格的答案（如 "采菊东篱下 悠然见南山" → 两个答案）
     split_result = []
