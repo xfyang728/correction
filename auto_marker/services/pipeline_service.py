@@ -233,14 +233,55 @@ class PipelineService:
             for pg, regions in layout_result["question_regions"].items():
                 question_regions.setdefault(pg, []).extend(regions)
 
-            if not hw_boxes:
-                logger.warning("第 %d 页: 未检测到手写区域", page_idx + 1)
-                continue
+            # Step D: 手写识别（支持 PaddleOCR / Qwen3-VL / 双路并行 / 整页识别）
+            from core.recognition_config import RECOGNITION_ENGINE
 
-            # Step D: 手写识别
-            page_results = recognize_handwriting(
-                processed_np, hw_boxes, ocr_records, page_idx,
-            )
+            if RECOGNITION_ENGINE == "page_level":
+                from core.qwen_vl_recognizer import recognize_page_level
+                # 整页识别：使用原始图像（不做预处理）
+                original_np = np.array(img)
+                # 使用 question_regions + hw_boxes 确定书写区域
+                page_question_regions = question_regions.get(page_idx, [])
+                if not page_question_regions:
+                    logger.warning("第 %d 页: 未检测到题目区域", page_idx + 1)
+                    continue
+                page_results = recognize_page_level(
+                    original_np, page_question_regions, page_idx,
+                    handwriting_boxes=hw_boxes,
+                )
+            else:
+                if not hw_boxes:
+                    logger.warning("第 %d 页: 未检测到手写区域", page_idx + 1)
+                    continue
+
+                if RECOGNITION_ENGINE == "qwen_vl":
+                    from core.qwen_vl_recognizer import recognize_with_qwen_vl
+                    page_results = recognize_with_qwen_vl(
+                        processed_np, hw_boxes, page_idx,
+                    )
+                elif RECOGNITION_ENGINE == "dual":
+                    from concurrent.futures import ThreadPoolExecutor
+                    from core.qwen_vl_recognizer import recognize_with_qwen_vl
+                    from core.recognition_merger import merge_recognition_results
+
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        paddle_future = pool.submit(
+                            recognize_handwriting,
+                            processed_np, hw_boxes, ocr_records, page_idx,
+                        )
+                        qwen_future = pool.submit(
+                            recognize_with_qwen_vl,
+                            processed_np, hw_boxes, page_idx,
+                        )
+                        paddle_results = paddle_future.result()
+                        qwen_results = qwen_future.result()
+
+                    page_results = merge_recognition_results(paddle_results, qwen_results)
+                else:
+                    # "paddle" — 原有逻辑
+                    page_results = recognize_handwriting(
+                        processed_np, hw_boxes, ocr_records, page_idx,
+                    )
             all_results.extend(page_results)
 
         doc.close()
