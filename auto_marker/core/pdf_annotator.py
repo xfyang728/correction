@@ -160,9 +160,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
                                    bbox, ocr_img_w, ocr_img_h)
                     continue
 
-                # 逐字标记的 bbox 中心（钳制到有效范围）
+                # bbox 中心（用于红圈/橙三角，钳制到有效范围）
                 cx_pixel = max(0, min((bbox[0] + bbox[2]) / 2, ocr_img_w))
                 cy_pixel = max(0, min((bbox[1] + bbox[3]) / 2, ocr_img_h))
+                # bbox 右下角（用于绿勾，钳制到有效范围）
+                br_x_pixel = max(0, min(bbox[2], ocr_img_w))
+                br_y_pixel = max(0, min(bbox[3], ocr_img_h))
                 bw_pixel = bbox[2] - bbox[0]
                 bh_pixel = bbox[3] - bbox[1]
                 # 最小半径限制（避免 bbox 过小时标记不可见）
@@ -170,6 +173,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
 
                 x_page, y_page = _pixel_to_page(
                     cx_pixel, cy_pixel,
+                    ocr_img_w, ocr_img_h,
+                    page.width, page.height,
+                )
+                # 绿勾锚点：字符右下角
+                ck_x_page, ck_y_page = _pixel_to_page(
+                    br_x_pixel, br_y_pixel,
                     ocr_img_w, ocr_img_h,
                     page.width, page.height,
                 )
@@ -187,7 +196,7 @@ def annotate(original_pdf: str, graded_results: list[dict],
                     elif status == "uncertain":
                         _draw_uncertain_triangle(can, x_page, y_page, mark_r)
                     else:
-                        _draw_checkmark(can, x_page, y_page, mark_r * 0.7)
+                        _draw_checkmark(can, ck_x_page, ck_y_page, mark_r * 0.7)
 
                 # ---- 按题模式 ----
                 elif use_question_mode:
@@ -209,7 +218,7 @@ def annotate(original_pdf: str, graded_results: list[dict],
                     elif status == "uncertain":
                         _draw_uncertain_triangle(can, x_page, y_page, mark_r)
                     else:
-                        _draw_checkmark(can, x_page, y_page, mark_r * 0.7)
+                        _draw_checkmark(can, ck_x_page, ck_y_page, mark_r * 0.7)
 
             # ---- 按题模式：绘制题号旁的绿色大对号 ----
             # 跳过逐字标记题（per_char 题即使全对也不画大绿✓，而是逐字画小绿勾）
