@@ -131,3 +131,19 @@ def _deskew_fast(img: np.ndarray) -> np.ndarray:
         borderValue=(255, 255, 255),
     )
     return rotated
+
+
+def deskew_only(img_array: np.ndarray) -> np.ndarray:
+    """P1-5: 仅做倾斜校正，不含 CLAHE/去噪，保留原始像素分布。
+
+    用于 Qwen3-VL 路径（可配置开关），避免 CLAHE 损害浅色铅笔字。
+    输入/输出均为 RGB numpy array (H, W, 3)。
+    """
+    if img_array.ndim == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array
+    deskewed_gray = _deskew_fast(gray)
+    if deskewed_gray.ndim == 2 and img_array.ndim == 3:
+        return cv2.cvtColor(deskewed_gray, cv2.COLOR_GRAY2RGB)
+    return deskewed_gray

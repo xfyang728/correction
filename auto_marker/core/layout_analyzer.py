@@ -310,6 +310,30 @@ def _detect_questions_from_boxes(
             len(markers),
         )
 
+    # ---- P2-7: 检测 ① 误识为 (1) 的冲突 ----
+    # PaddleOCR 可能把 ① 识成 "(1)"，导致 q_idx=0 与真 (1) 冲突
+    # 若同 q_idx 有多个 marker 且 y 差距 > 200px，后者重新分配到 circle range
+    from collections import Counter
+    _CONFLICT_Y_THRESHOLD = 200
+    q_idx_counts = Counter(m["q_idx"] for m in markers)
+    for qi, count in q_idx_counts.items():
+        if count <= 1 or not (0 <= qi < 100):
+            continue
+        conflict_markers = sorted(
+            [m for m in markers if m["q_idx"] == qi],
+            key=lambda m: m["y_center"],
+        )
+        first_y = conflict_markers[0]["y_center"]
+        for i, m in enumerate(conflict_markers[1:], start=1):
+            if abs(m["y_center"] - first_y) > _CONFLICT_Y_THRESHOLD:
+                new_qi = 200 + i - 1
+                logger.info(
+                    "第 %d 页: 检测到可能的 ① 误识为 (1)，"
+                    "q_idx %d → %d (y=%.0f vs first y=%.0f)",
+                    page_idx + 1, qi, new_qi, m["y_center"], first_y,
+                )
+                m["q_idx"] = new_qi
+
     # ---- 按 q_idx 去重（同题号取 y 最小的） ----
     markers_dict: dict[int, dict] = {}
     for m in markers:

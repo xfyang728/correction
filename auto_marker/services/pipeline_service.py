@@ -247,8 +247,13 @@ class PipelineService:
 
             if RECOGNITION_ENGINE == "page_level":
                 from core.qwen_vl_recognizer import recognize_page_level
-                # 整页识别：使用原始图像（不做预处理）
+                from core.recognition_config import QWEN_VL_USE_DESKEW
+                # 整页识别：默认用原始图像；可选倾斜校正（P1-5）
                 original_np = np.array(img)
+                if QWEN_VL_USE_DESKEW:
+                    from core.image_processor import deskew_only
+                    original_np = deskew_only(original_np)
+                    logger.debug("第 %d 页: VL 路径已启用倾斜校正", page_idx + 1)
                 # 使用 question_regions + hw_boxes 确定书写区域
                 page_question_regions = question_regions.get(page_idx, [])
                 if not page_question_regions:

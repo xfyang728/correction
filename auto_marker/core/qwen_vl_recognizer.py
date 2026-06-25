@@ -359,16 +359,89 @@ def _question_marker_to_q_idx(marker: str) -> int | None:
     return _question_match(marker)
 
 
+def _parse_answers_text(answers_text: str) -> dict[int, list[str]]:
+    """解析原始多行标准答案文本，返回 {q_idx: [char, ...]}。
+
+    支持格式:
+        （1）随君直到夜郎西
+        （2）海内存知己
+        ...
+        ① 质朴；② 绚丽
+
+    用于: P0-1 invalid 题回退取答案文本、P0-2 合并题按标准答案字数拆分。
+    """
+    import re
+
+    result: dict[int, list[str]] = {}
+    if not answers_text:
+        return result
+
+    _CIRCLED = {'①':1,'②':2,'③':3,'④':4,'⑤':5,
+                '⑥':6,'⑦':7,'⑧':8,'⑨':9,'⑩':10}
+    _QIDX_OFFSET_PAREN = 0
+    _QIDX_OFFSET_DOT = 100
+    _QIDX_OFFSET_CIRCLE = 200
+
+    for line in answers_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # 括号题号: （1）答案
+        for m in re.finditer(r"[（(](\d+)[)）]\s*([^（(①②③④⑤⑥⑦⑧⑨⑩]*)", line):
+            q_num = int(m.group(1))
+            chars = [ch for ch in m.group(2) if is_chinese_char(ch)]
+            if chars:
+                result[q_num - 1 + _QIDX_OFFSET_PAREN] = chars
+
+        # 带圈数字: ①答案；②答案  （一行可含多个）
+        parts = re.split(r"[；;]", line)
+        for part in parts:
+            m = re.match(r"\s*([①②③④⑤⑥⑦⑧⑨⑩])\s*(.+)", part)
+            if m:
+                q_num = _CIRCLED.get(m.group(1), 0)
+                chars = [ch for ch in m.group(2) if is_chinese_char(ch)]
+                if chars and q_num:
+                    result[q_num - 1 + _QIDX_OFFSET_CIRCLE] = chars
+
+        # 点号题号: 1. 答案
+        m = re.match(r"(\d+)\s*[.、]\s*(.+)", line)
+        if m:
+            q_num = int(m.group(1))
+            chars = [ch for ch in m.group(2) if is_chinese_char(ch)]
+            if chars:
+                result[q_num - 1 + _QIDX_OFFSET_DOT] = chars
+
+    return result
+
+
+def _q_idx_format_range(q_idx: int) -> str:
+    """根据 q_idx 判断题号格式: 'paren'(0-99), 'dot'(100-199), 'circle'(200-209)。"""
+    if 200 <= q_idx < 210:
+        return "circle"
+    if 100 <= q_idx < 200:
+        return "dot"
+    return "paren"
+
+
 def _match_q_idx_by_bbox(
     char_bbox_pixel: tuple,
     region_by_qidx: dict[int, dict],
     img_w: int,
+    expected_format: str | None = None,
 ) -> int | None:
-    """用首字像素 bbox 中心 y 匹配 region 的 [y_start,y_end]，x 中心与 marker 列同侧过滤。"""
+    """用首字像素 bbox 中心 y 匹配 region 的 [y_start,y_end]，x 中心与 marker 列同侧过滤。
+
+    expected_format: 若提供 ('paren'/'dot'/'circle')，只匹配同格式范围的 region，
+                     防止 ① 的坐标误匹配到 (3) 等跨格式 region（P0-3）。
+    """
     cx = (char_bbox_pixel[0] + char_bbox_pixel[2]) / 2
     cy = (char_bbox_pixel[1] + char_bbox_pixel[3]) / 2
     page_mid = img_w / 2
     for q_idx, region in region_by_qidx.items():
+        # P0-3: 格式过滤，防止带圈数字误匹配括号题号 region
+        if expected_format and _q_idx_format_range(q_idx) != expected_format:
+            continue
         if not (region["y_start"] <= cy < region["y_end"]):
             continue
         marker_bbox = region.get("marker_bbox")
@@ -378,6 +451,59 @@ def _match_q_idx_by_bbox(
                 continue
         return q_idx
     return None
+
+
+def _clamp_chars_to_column(
+    char_items: list[dict],
+    region: dict,
+    img_w: int,
+    handwriting_boxes: list[dict] | None = None,
+) -> list[dict]:
+    """P2-6: 当模型 x 坐标落在错误列时，用等宽 x 切分替换，保留模型 y 坐标。
+
+    模型可能把双栏当单栏输出坐标（如左栏答案 x=0.64 落在右栏区域）。
+    检测：若某 char 的 x 中心与 marker 不同侧，说明模型坐标列归属错误。
+    修复：对该题所有 char，用 _estimate_question_x_range 获取列 x 范围，
+    按字数等宽切分 x（保留模型 y 坐标，因 y 通常更准）。
+    """
+    marker_bbox = region.get("marker_bbox")
+    if not marker_bbox or not char_items:
+        return char_items
+
+    marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2
+    page_mid = img_w / 2
+    is_left = marker_cx < page_mid
+
+    # 检测是否有 char 的 x 中心落在错误列
+    has_wrong_column = False
+    for ci in char_items:
+        x0, y0, x1, y1 = ci["bbox_norm"]
+        char_cx_pixel = ((x0 + x1) / 2) * img_w
+        if (char_cx_pixel < page_mid) != is_left:
+            has_wrong_column = True
+            break
+
+    if not has_wrong_column:
+        return char_items
+
+    # 列归属错误 → 用等宽 x 切分替换，保留模型 y
+    x_start, x_end = _estimate_question_x_range(region, handwriting_boxes, img_w)
+    if x_start >= x_end:
+        return char_items
+
+    n = len(char_items)
+    col_w = x_end - x_start
+    char_w = col_w / n
+    margin = char_w * 0.05
+
+    clamped = []
+    for i, ci in enumerate(char_items):
+        _, y0, _, y1 = ci["bbox_norm"]
+        new_x0 = (x_start + i * char_w + margin) / img_w
+        new_x1 = (x_start + (i + 1) * char_w - margin) / img_w
+        clamped.append({**ci, "bbox_norm": (new_x0, y0, new_x1, y1)})
+    logger.debug("列归属错误，已用等宽 x 切分替换 %d 字", n)
+    return clamped
 
 
 def _estimate_question_x_range(
@@ -604,6 +730,97 @@ def _parse_page_level_response(response: str) -> list[dict]:
     return results
 
 
+def _estimate_confidence(
+    char_items: list[dict],
+    std_chars: list[str],
+    is_invalid: bool,
+) -> float:
+    """P1-4: 估算伪置信度，让 needs_review 可触发。
+
+    - invalid（坐标无效）→ 0.50
+    - 字数匹配标准答案 → 0.90
+    - 字数不匹配 → 0.70
+    - 无标准答案参照 → 0.85
+    """
+    if is_invalid:
+        return 0.50
+    if not std_chars:
+        return 0.85
+    if len(char_items) == len(std_chars):
+        return 0.90
+    return 0.70
+
+
+def _split_merged_json_chars(
+    char_items: list[dict],
+    q_idx: int,
+    std_answers_by_qidx: dict[int, list[str]],
+    region_by_qidx: dict[int, dict],
+    page_idx: int,
+    img_w: int,
+    img_h: int,
+    used_regions: set[int],
+) -> list[dict]:
+    """P0-2: 将合并的 JSON chars 按标准答案字数拆分为多题。
+
+    模型可能把 (7)(8) 合并输出为一题。按标准答案字数切分：
+      (7) 标准答案 5 字 → char_items[:5] → q_idx
+      (8) 标准答案 5 字 → char_items[5:10] → q_idx+1
+
+    找不到下一题标准答案时，剩余全部归当前题。
+    """
+    results: list[dict] = []
+    remaining = list(char_items)
+    current_q_idx = q_idx
+    fmt = _q_idx_format_range(q_idx)
+
+    while remaining:
+        std_chars = std_answers_by_qidx.get(current_q_idx, [])
+        if std_chars and len(remaining) > len(std_chars) + 2:
+            # 取标准答案字数个字归当前题
+            take = len(std_chars)
+        else:
+            # 剩余全部归当前题
+            take = len(remaining)
+
+        chunk = remaining[:take]
+        remaining = remaining[take:]
+
+        # 查找当前题的 region（可能不存在）
+        region = region_by_qidx.get(current_q_idx)
+        if region:
+            used_regions.add(current_q_idx)
+            # P2-6: clamp 到列范围
+            chunk = _clamp_chars_to_column(chunk, region, img_w, handwriting_boxes=None)
+
+        conf = _estimate_confidence(chunk, std_chars, is_invalid=False)
+        for ci in chunk:
+            pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
+            results.append({
+                "page": page_idx,
+                "bbox_pixel": pixel_bbox,
+                "char": ci["char"],
+                "confidence": conf,
+                "question_idx": current_q_idx,
+                "img_pixel_w": img_w,
+                "img_pixel_h": img_h,
+                "engine": "qwen_vl_page_level",
+            })
+
+        # 找下一题 q_idx（同格式范围内递增）
+        next_q_idx = None
+        for candidate in sorted(std_answers_by_qidx.keys()):
+            if candidate > current_q_idx and _q_idx_format_range(candidate) == fmt:
+                next_q_idx = candidate
+                break
+
+        if next_q_idx is None or not remaining:
+            break
+        current_q_idx = next_q_idx
+
+    return results
+
+
 def recognize_page_level(
     img,
     question_regions: list[dict],
@@ -648,10 +865,14 @@ def recognize_page_level(
     all_results: list[dict] = []
     used_regions: set[int] = set()
 
+    # P0-1/P0-2: 解析标准答案，用于 invalid 回退和合并题拆分
+    std_answers_by_qidx = _parse_answers_text(answers_text)
+
     # ---- 优先尝试 JSON 逐字坐标路径 ----
     parsed_json = _parse_page_level_json(response)
 
     if parsed_json is not None:
+        import re as _re
         json_success_count = 0
         fallback_count = 0
         logger.info("第 %d 页: JSON 解析成功，%d 道题", page_idx + 1, len(parsed_json))
@@ -664,12 +885,63 @@ def recognize_page_level(
             # 题号 → q_idx（复用 layout_analyzer 逻辑）
             target_q_idx = _question_marker_to_q_idx(q_marker) if q_marker else None
 
-            # q_idx 匹配失败时，用首字像素坐标兜底定位
+            # P0-3: q_idx 匹配失败时，用首字像素坐标兜底定位（格式感知）
+            # 注意：bbox 兜底只对有题号格式但未匹配的题生效；
+            # 无题号格式的 q_marker（如"下联："）若 region 已被占用则跳过，避免覆盖
             if (target_q_idx is None or target_q_idx not in region_by_qidx) and char_items:
                 first_bbox_norm = char_items[0].get("bbox_norm")
                 if first_bbox_norm:
                     first_pixel = _norm_to_pixel_bbox(first_bbox_norm, img_w, img_h)
-                    target_q_idx = _match_q_idx_by_bbox(first_pixel, region_by_qidx, img_w)
+                    # 推断期望格式，防止 ① 误匹配到 (3) 等跨格式 region
+                    expected_fmt = None
+                    has_q_format = False
+                    if any(c in q_marker for c in "①②③④⑤⑥⑦⑧⑨⑩"):
+                        expected_fmt = "circle"
+                        has_q_format = True
+                    elif _re.match(r"\d+\s*[.、]", q_marker):
+                        expected_fmt = "dot"
+                        has_q_format = True
+                    elif _re.match(r"[（(]\d+[)）]", q_marker):
+                        expected_fmt = "paren"
+                        has_q_format = True
+
+                    if has_q_format:
+                        # 先尝试格式精确匹配
+                        target_q_idx = _match_q_idx_by_bbox(
+                            first_pixel, region_by_qidx, img_w,
+                            expected_format=expected_fmt)
+                        # 格式匹配失败 → 退化为无格式匹配（跳过已占用 region）
+                        if target_q_idx is None:
+                            for candidate_qi, candidate_region in region_by_qidx.items():
+                                if candidate_qi in used_regions:
+                                    continue
+                                cy = (first_pixel[1] + first_pixel[3]) / 2
+                                if not (candidate_region["y_start"] <= cy < candidate_region["y_end"]):
+                                    continue
+                                mb = candidate_region.get("marker_bbox")
+                                if mb:
+                                    marker_cx = (mb[0] + mb[2]) / 2
+                                    char_cx = (first_pixel[0] + first_pixel[2]) / 2
+                                    if (marker_cx < img_w / 2) != (char_cx < img_w / 2):
+                                        continue
+                                target_q_idx = candidate_qi
+                                break
+                    else:
+                        # 无题号格式（如"下联："）→ 尝试匹配未占用的 region
+                        for candidate_qi, candidate_region in region_by_qidx.items():
+                            if candidate_qi in used_regions:
+                                continue
+                            cy = (first_pixel[1] + first_pixel[3]) / 2
+                            if not (candidate_region["y_start"] <= cy < candidate_region["y_end"]):
+                                continue
+                            marker_bbox = candidate_region.get("marker_bbox")
+                            if marker_bbox:
+                                marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2
+                                char_cx = (first_pixel[0] + first_pixel[2]) / 2
+                                if (marker_cx < img_w / 2) != (char_cx < img_w / 2):
+                                    continue
+                            target_q_idx = candidate_qi
+                            break
 
             if target_q_idx is None or target_q_idx not in region_by_qidx:
                 logger.debug("题号 '%s' (q_idx=%s) 无匹配区域，跳过", q_marker, target_q_idx)
@@ -681,25 +953,59 @@ def recognize_page_level(
 
             # 该题所有字都有合法 bbox → 用模型坐标
             if char_items and not is_invalid:
-                for ci in char_items:
-                    pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
-                    all_results.append({
-                        "page": page_idx,
-                        "bbox_pixel": pixel_bbox,
-                        "char": ci["char"],
-                        "confidence": 0.85,
-                        "question_idx": q_idx,
-                        "img_pixel_w": img_w,
-                        "img_pixel_h": img_h,
-                        "engine": "qwen_vl_page_level",
-                    })
-                json_success_count += 1
-                logger.debug("题号 '%s' q_idx=%d: 用模型坐标 (%d 字)",
-                             q_marker, q_idx, len(char_items))
+                std_chars = std_answers_by_qidx.get(q_idx, [])
+
+                # P0-2: 检测合并题（chars 数 > 标准答案字数 + 2）
+                if std_chars and len(char_items) > len(std_chars) + 2:
+                    split_results = _split_merged_json_chars(
+                        char_items, q_idx, std_answers_by_qidx,
+                        region_by_qidx, page_idx, img_w, img_h, used_regions,
+                    )
+                    all_results.extend(split_results)
+                    json_success_count += 1
+                    logger.info("题号 '%s' q_idx=%d: 检测到合并题，已拆分 (%d 字 → %d 字)",
+                                q_marker, q_idx, len(char_items), len(split_results))
+                else:
+                    # P2-6: clamp 到列范围
+                    clamped_items = _clamp_chars_to_column(char_items, region, img_w, handwriting_boxes)
+                    # P1-4: 估算置信度
+                    conf = _estimate_confidence(char_items, std_chars, is_invalid=False)
+                    for ci in clamped_items:
+                        pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
+                        all_results.append({
+                            "page": page_idx,
+                            "bbox_pixel": pixel_bbox,
+                            "char": ci["char"],
+                            "confidence": conf,
+                            "question_idx": q_idx,
+                            "img_pixel_w": img_w,
+                            "img_pixel_h": img_h,
+                            "engine": "qwen_vl_page_level",
+                        })
+                    json_success_count += 1
+                    logger.debug("题号 '%s' q_idx=%d: 用模型坐标 (%d 字, conf=%.2f)",
+                                 q_marker, q_idx, len(char_items), conf)
             else:
-                # 该题坐标无效 → 回退等宽切分（需要从旧解析器拿答案文本）
+                # P0-1: 坐标无效 → 从标准答案取文本，走等宽切分
                 fallback_count += 1
-                logger.debug("题号 '%s' q_idx=%d: 坐标无效，回退等宽切分", q_marker, q_idx)
+                std_chars = std_answers_by_qidx.get(q_idx, [])
+                if std_chars:
+                    x_start, x_end = _estimate_question_x_range(
+                        region, handwriting_boxes, img_w)
+                    split = _equal_width_split(
+                        std_chars, x_start, x_end,
+                        region["y_start"], region["y_end"],
+                        page_idx, q_idx, img_w, img_h,
+                    )
+                    # P1-4: invalid 题置信度 0.50
+                    for r in split:
+                        r["confidence"] = 0.50
+                    all_results.extend(split)
+                    logger.info("题号 '%s' q_idx=%d: 坐标无效，用标准答案等宽切分 (%d 字)",
+                                q_marker, q_idx, len(split))
+                else:
+                    logger.warning("题号 '%s' q_idx=%d: 坐标无效且无标准答案，跳过",
+                                   q_marker, q_idx)
 
         logger.info(
             "第 %d 页: JSON 路径 — 模型坐标 %d 题, 回退 %d 题",

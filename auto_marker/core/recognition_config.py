@@ -52,6 +52,10 @@ QWEN_VL_PAGE_LEVEL_MAX_TOKENS = 4096
 # 整页识别超时（4B 模型生成 2000+ token 需要更久，单独控制不影响单框识别的 30s）
 QWEN_VL_PAGE_LEVEL_TIMEOUT = 120
 
+# P1-5: VL 路径是否启用倾斜校正（不含 CLAHE，避免损害浅色铅笔字）
+# False = 用原始 PDF 图像（遵守硬约束）；True = 仅做 deskew 后送 VL
+QWEN_VL_USE_DESKEW = False
+
 # ---- 双路合并策略 ----
 # "paddle_priority": PaddleOCR 为主，Qwen3-VL 仅在低置信度时覆盖
 # "qwen_priority": Qwen3-VL 文本为主，PaddleOCR 提供 bbox
