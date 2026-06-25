@@ -228,9 +228,9 @@ def annotate(original_pdf: str, graded_results: list[dict],
                         continue
                     if q_data.get("question_type") == "per_char":
                         continue
+                    # 对勾位置：x 用答案末字右边缘，y 用题号垂直中心（保证竖向对齐）
+                    answer_bbox = q_data.get("answer_bbox")
                     marker_bbox = q_data.get("marker_bbox")
-                    if not marker_bbox:
-                        continue
 
                     # 使用第一项的 img 尺寸进行坐标转换
                     first_result = page_results[0] if page_results else None
@@ -239,9 +239,21 @@ def annotate(original_pdf: str, graded_results: list[dict],
                     ocr_img_w = first_result["img_pixel_w"]
                     ocr_img_h = first_result["img_pixel_h"]
 
-                    # 题号 bbox 右侧居中位置
-                    mx = marker_bbox[2] + (marker_bbox[2] - marker_bbox[0]) * 0.3
-                    my = (marker_bbox[1] + marker_bbox[3]) / 2
+                    if answer_bbox:
+                        mx = max(0, min(answer_bbox[2], ocr_img_w))
+                    elif marker_bbox:
+                        mx = marker_bbox[2] + (marker_bbox[2] - marker_bbox[0]) * 0.3
+                    else:
+                        continue
+
+                    if marker_bbox:
+                        my = (marker_bbox[1] + marker_bbox[3]) / 2
+                    elif answer_bbox:
+                        my = (answer_bbox[1] + answer_bbox[3]) / 2
+                    else:
+                        continue
+
+                    q_mark_size = 14
 
                     qx_page, qy_page = _pixel_to_page(
                         mx, my,
@@ -249,12 +261,8 @@ def annotate(original_pdf: str, graded_results: list[dict],
                         page.width, page.height,
                     )
 
-                    # 大绿勾（大小限制 18pt）
-                    scale = page.width / ocr_img_w if ocr_img_w > 0 else 1
-                    q_mark_size = min(max(
-                        marker_bbox[2] - marker_bbox[0],
-                        marker_bbox[3] - marker_bbox[1],
-                    ) * 0.7 * scale, 18)
+                    # 固定大小 14pt，不随 bbox 缩放
+                    q_mark_size = 14
 
                     can.setStrokeColorRGB(0, 0.6, 0)
                     can.setLineWidth(3)

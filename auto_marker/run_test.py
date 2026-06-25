@@ -36,15 +36,25 @@ def seed_answers(class_name: str, date_str: str, text: str):
 
 def run_pipeline(pdf_name: str):
     """直接对 incoming 目录中的 PDF 运行流水线。"""
+    import shutil
+    import tempfile
     from monitor.processor import process_pdf
 
     incoming = ROOT / "data" / "incoming" / pdf_name
+    src = ROOT / pdf_name
+    src_existed = src.exists()
+
+    # 备份源文件（如果存在）
+    backup_file = None
+    if src_existed:
+        backup_file = Path(tempfile.mktemp(suffix=".pdf"))
+        shutil.copy2(str(src), str(backup_file))
+        print(f"📄 已备份源文件到: {backup_file}")
+
     if not incoming.exists():
         print(f"❌ 文件不存在: {incoming}")
         # 尝试从根目录复制
-        src = ROOT / pdf_name
-        if src.exists():
-            import shutil
+        if src_existed:
             shutil.copy2(str(src), str(incoming))
             print(f"📄 已从 {src} 复制到 {incoming}")
         else:
@@ -56,6 +66,12 @@ def run_pipeline(pdf_name: str):
     print(f"{'='*50}\n")
 
     process_pdf(str(incoming))
+
+    # 恢复源文件（如果原本存在）
+    if backup_file and backup_file.exists():
+        shutil.copy2(str(backup_file), str(src))
+        backup_file.unlink()  # 删除临时备份
+        print(f"📄 已恢复源文件: {src}")
 
     print(f"\n{'='*50}")
     print("✅ 处理完成，请查看 data/output/ 目录")

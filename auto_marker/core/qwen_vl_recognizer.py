@@ -227,11 +227,68 @@ def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = 
         return ""
 
 
+def _split_embedded_questions(answer: str, start_q: int) -> list[tuple[int, str]]:
+    """检测答案文本中是否内嵌了额外题号（如 "（2）海内存知己"），拆分为多题。
+
+    返回: [(q_num, answer_text), ...]
+    """
+    import re
+    # 匹配内嵌题号: （2）xxx 或 (2) xxx
+    pattern = re.compile(r"[（(](\d+)[)）]\s*(.+?)(?=[（(]\d+[)）]|$)")
+    matches = pattern.findall(answer)
+    if not matches:
+        return [(start_q, answer)]
+    result = []
+    for q_str, text in matches:
+        q = int(q_str)
+        text = text.strip()
+        if text:
+            result.append((q, text))
+    return result if result else [(start_q, answer)]
+
+
+def _clean_answer_text(text: str) -> str:
+    """清理答案文本，去除批改结论、解释说明等非答案内容。
+
+    例如："随君直到夜郎西 —— ✅ 正确" → "随君直到夜郎西"
+          "（1）随君直到夜郎西" → "随君直到夜郎西"
+    """
+    import re
+
+    # 去掉以 —— 或 | 开头的批改结论部分
+    text = re.split(r"\s*(?:——|\|)\s*", text, maxsplit=1)[0]
+    # 去掉常见的解释前缀
+    text = re.sub(r"^(?:学生(?:填|答|写)|答案|正确答案|标准答案|应填|可填)[:：是]\s*", "", text)
+    # 去掉引号包裹
+    text = text.strip('""')
+    text = text.strip("''")
+    return text.strip()
+
+
+def _is_explain_line(line: str) -> bool:
+    """判断一行是否为解释/说明/理由等非答案文本。"""
+    explain_prefixes = [
+        "题目", "理由", "原因", "解析", "分析", "说明", "注意", "结论",
+        "总结", "建议", "教学建议", "扣分", "错误点", "错误类型",
+        "实际应为", "例如", "正确做法", "学生写", "学生答", "学生填",
+        "本题", "本小题", "本题答案", "→", "➡️", "⚠️", "📌", "❗", "✅", "❌",
+    ]
+    line_lower = line.strip()
+    for prefix in explain_prefixes:
+        if line_lower.startswith(prefix):
+            return True
+    # 包含明显解释性关键词且较长
+    explain_keywords = ["理由", "扣分原因", "教学建议", "建议评分", "错误点", "错误类型"]
+    if any(kw in line for kw in explain_keywords):
+        return True
+    return False
+
+
 def _parse_page_level_response(response: str) -> list[dict]:
     """解析整页识别响应，返回按顺序排列的答案列表。
 
-    处理新格式：(1) 学生答案 | 正确/错误 | 错误说明
-    返回: [{"answer": "答案", "correct": True/False, "error": "错误说明"}, ...]
+    返回: [{"q_num": int|None, "q_format": str, "answer": str,
+            "correct": bool|None, "error": str}, ...]
     """
     import re
 
@@ -243,77 +300,80 @@ def _parse_page_level_response(response: str) -> list[dict]:
         if not line:
             continue
 
-        # 匹配新格式: (1) 学生答案 | 正确/错误 | 错误说明
-        m = re.match(r"[（(](\d+)[)）]\s*(.+?)\s*\|\s*(正确|错误)\s*\|\s*(.*)", line)
+        # 过滤列表标记行
+        if line in ("-", "—", "*"):
+            continue
+
+        # 过滤解释性/说明性行
+        if _is_explain_line(line):
+            continue
+
+        # 匹配: - （1）答案 —— ✅ 正确  或  （1）答案 | 正确 | 说明
+        _PAREN_RE = re.compile(
+            r"(?:-\s*)?[（(](\d+)[)）]\s*(.+?)(?:\s*(?:——|\|)\s*(✅\s*正确|❌\s*错误|正确|错误)(?:\s*[（(].*?[)）])?)?(?:\s*\|\s*(.*))?$")
+        m = _PAREN_RE.match(line)
         if m:
             q_num = int(m.group(1))
-            answer = m.group(2).strip()
-            is_correct = m.group(3) == "正确"
+            answer = _clean_answer_text(m.group(2).strip())
+            correct_str = m.group(3) or ""
+            is_correct = "正确" in correct_str if correct_str else None
             error = m.group(4).strip() if m.group(4) else ""
-            # 过滤"未作答"
-            if "未作答" not in answer:
-                # 检测题号是否重复（如拼音填空的①②被识别成(1)(2)）
+            if "未作答" not in answer and answer:
                 if q_num <= last_q_num:
-                    # 题号重复，说明是新的题型，重置题号
                     q_num = last_q_num + 1
+                # 检测答案文本中是否内嵌了额外题号（如 "（2）海内存知己"），拆分
+                sub_items = _split_embedded_questions(answer, q_num)
+                if len(sub_items) > 1:
+                    for sq, sa in sub_items:
+                        if sq <= last_q_num:
+                            sq = last_q_num + 1
+                        results.append({
+                            "q_num": sq, "q_format": "paren",
+                            "answer": sa, "correct": None, "error": "",
+                        })
+                        last_q_num = sq
+                else:
+                    results.append({
+                        "q_num": q_num,
+                        "q_format": "paren",
+                        "answer": answer,
+                        "correct": is_correct,
+                        "error": error,
+                    })
+                    last_q_num = q_num
+            continue
+
+        # 带圈数字: ① 答案
+        _CIRCLED = {'①':1,'②':2,'③':3,'④':4,'⑤':5,'⑥':6,'⑦':7,'⑧':8,'⑨':9,'⑩':10}
+        m = re.match(r"(?:-\s*)?([①②③④⑤⑥⑦⑧⑨⑩])\s*[.、]?\s*(.+)", line)
+        if m:
+            circled = m.group(1)
+            answer = _clean_answer_text(m.group(2).strip())
+            if answer:
+                q_num = _CIRCLED.get(circled, last_q_num + 1)
                 results.append({
-                    "answer": answer,
-                    "correct": is_correct,
-                    "error": error,
+                    "q_num": q_num, "q_format": "circle",
+                    "answer": answer, "correct": None, "error": "",
                 })
                 last_q_num = q_num
             continue
 
-        # 兼容旧格式：只提取答案文本
-        # 去除题号前缀
-        m = re.match(r"[（(](\d+)[)）]\s*(.+)", line)
+        # 数字+点: 1. 答案
+        m = re.match(r"(?:-\s*)?(\d+)\s*[.、]\s*(.+)", line)
         if m:
-            q_num = int(m.group(1))
-            answer = m.group(2).strip()
-            # 检测题号是否重复
-            if q_num <= last_q_num:
-                q_num = last_q_num + 1
-            results.append({"answer": answer, "correct": None, "error": ""})
-            last_q_num = q_num
-            continue
-
-        m = re.match(r"[①②③④⑤⑥⑦⑧⑨⑩]\s*[.、]?\s*(.+)", line)
-        if m:
-            results.append({"answer": m.group(1).strip(), "correct": None, "error": ""})
-            last_q_num += 1
-            continue
-
-        m = re.match(r"\d+\s*[.、]\s*(.+)", line)
-        if m:
-            results.append({"answer": m.group(1).strip(), "correct": None, "error": ""})
-            last_q_num += 1
-            continue
-
-        # 无题号行：如果是汉字内容且长度合理，追加到上一个答案
-        chinese_chars = [ch for ch in line if is_chinese_char(ch)]
-        if len(chinese_chars) >= 2 and len(line) < 30:
-            if results:
-                # 追加到上一个答案
-                results[-1]["answer"] += line
-            else:
-                results.append({"answer": line, "correct": None, "error": ""})
-                last_q_num += 1
-
-    # 拆分包含空格的答案（如 "采菊东篱下 悠然见南山" → 两个答案）
-    split_result = []
-    for item in results:
-        parts = item["answer"].split()
-        for part in parts:
-            # 只保留包含至少2个中文字符的答案
-            chinese_chars = [ch for ch in part if is_chinese_char(ch)]
-            if len(chinese_chars) >= 2:
-                split_result.append({
-                    "answer": part,
-                    "correct": item["correct"],
-                    "error": item["error"],
+            answer = _clean_answer_text(m.group(2).strip())
+            if answer and not _is_explain_line(answer):
+                q_num = int(m.group(1))
+                results.append({
+                    "q_num": q_num, "q_format": "dot",
+                    "answer": answer, "correct": None, "error": "",
                 })
+                last_q_num = q_num
+            continue
 
-    return split_result
+        # 无题号行不再追加到答案，避免解释性文字混入
+
+    return results
 
 
 def recognize_page_level(
@@ -362,59 +422,90 @@ def recognize_page_level(
         page_idx + 1, len(question_answers),
     )
 
-    # 将答案按顺序与 question_regions 对应
-    # 如果答案数量与题目数量不匹配，取较小值
-    num_questions = min(len(question_answers), len(question_regions))
-    if len(question_answers) != len(question_regions):
-        logger.warning(
-            "第 %d 页: 答案数量 (%d) 与题目数量 (%d) 不匹配，取前 %d 个",
-            page_idx + 1, len(question_answers), len(question_regions), num_questions
-        )
+    # ---- 按 q_idx 匹配答案与题目区域 ----
+    # 与 layout_analyzer 使用相同的偏移量
+    _QIDX_OFFSET_PAREN = 0
+    _QIDX_OFFSET_DOT = 100
+    _QIDX_OFFSET_CIRCLE = 200
+
+    def _answer_to_q_idx(answer_item: dict) -> int | None:
+        """将答案的 q_num + q_format 转换为 q_idx。"""
+        q_num = answer_item.get("q_num")
+        if q_num is None:
+            return None
+        q_format = answer_item.get("q_format", "paren")
+        if q_format == "circle":
+            return q_num - 1 + _QIDX_OFFSET_CIRCLE
+        elif q_format == "dot":
+            return q_num - 1 + _QIDX_OFFSET_DOT
+        else:  # paren
+            return q_num - 1 + _QIDX_OFFSET_PAREN
+
+    # 构建 q_idx → region 查找表
+    region_by_qidx: dict[int, dict] = {}
+    for region in question_regions:
+        region_by_qidx[region["q_idx"]] = region
 
     # 为每道题生成逐字结果
     all_results: list[dict] = []
-    for i in range(num_questions):
-        region = question_regions[i]
-        answer_item = question_answers[i]
-        answer_text = answer_item["answer"] if isinstance(answer_item, dict) else answer_item
-        q_idx = region["q_idx"]
+    used_regions: set[int] = set()
 
-        # 提取中文字符
+    for answer_item in question_answers:
+        answer_text = answer_item["answer"]
         chars = [ch for ch in answer_text if is_chinese_char(ch)]
         if not chars:
             continue
 
-        # 使用该题的 y 区间
+        # 按 q_idx 精确匹配，匹配失败则跳过（不标记到错误区域）
+        target_q_idx = _answer_to_q_idx(answer_item)
+        if target_q_idx is None or target_q_idx not in region_by_qidx:
+            logger.debug("答案 '%s' (q_idx=%s) 无匹配区域，跳过", answer_text[:20], target_q_idx)
+            continue
+
+        region = region_by_qidx[target_q_idx]
+        used_regions.add(target_q_idx)
+        logger.debug("答案 q_idx=%d → 匹配区域 q_idx=%d (%s)",
+                     target_q_idx, region["q_idx"], region.get("marker_text", ""))
+
+        q_idx = region["q_idx"]
         y_start = region["y_start"]
         y_end = region["y_end"]
-        
-        # 从 handwriting_boxes 中找出落在该 y 区间内的手写框，确定实际书写 x 范围
+
+        # 从 handwriting_boxes 中找出落在该 y 区间内且同列的手写框
+        marker_bbox = region.get("marker_bbox")
         x_start, x_end = None, None
         if handwriting_boxes:
+            # 用 marker_bbox 的 x 中心判断所属列（左/右栏）
+            marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
             for hw_box in handwriting_boxes:
                 hw_bbox = hw_box.get("bbox_pixel")
                 if not hw_bbox:
                     continue
                 hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
-                # 检查手写框是否在该题的 y 区间内
                 if y_start <= hw_y_center < y_end:
+                    hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
+                    # 列过滤：手写框 x 中心须与题号 x 中心在同侧（以页面中线为界）
+                    page_mid = img_w / 2
+                    if (marker_cx < page_mid) != (hw_cx < page_mid):
+                        continue
                     if x_start is None or hw_bbox[0] < x_start:
                         x_start = hw_bbox[0]
                     if x_end is None or hw_bbox[2] > x_end:
                         x_end = hw_bbox[2]
-        
-        # 如果没有找到匹配的手写框，使用默认范围（题号右侧到页面右边缘）
+
         if x_start is None or x_end is None:
-            marker_bbox = region.get("marker_bbox")
             if marker_bbox:
-                x_start = marker_bbox[2]  # 从题号右侧开始
+                x_start = marker_bbox[2]
                 x_end = img_w
             else:
-                x_start = 0
-                x_end = img_w
+                x_start = x_start or 0
+                x_end = x_end or img_w
 
         # 等宽切分字符
         region_w = x_end - x_start
+        if region_w <= 0:
+            logger.debug("q_idx=%d: region_w=%d <= 0, 跳过", q_idx, region_w)
+            continue
         char_w = region_w / len(chars)
         margin = char_w * 0.05
 
@@ -429,12 +520,21 @@ def recognize_page_level(
                 "page": page_idx,
                 "bbox_pixel": (cx0, y_start, cx2, y_end),
                 "char": ch,
-                "confidence": 0.85,  # VL 模型无逐字置信度，给默认值
+                "confidence": 0.85,
                 "question_idx": q_idx,
                 "img_pixel_w": img_w,
                 "img_pixel_h": img_h,
                 "engine": "qwen_vl_page_level",
             })
+
+    # 统计未匹配的区域
+    unmatched = [r for r in question_regions if r["q_idx"] not in used_regions]
+    if unmatched:
+        logger.info(
+            "第 %d 页: %d 个题目区域未匹配到答案: %s",
+            page_idx + 1, len(unmatched),
+            [r.get("marker_text", f"q_idx={r['q_idx']}") for r in unmatched],
+        )
 
     elapsed = time.time() - t_start
     logger.info(

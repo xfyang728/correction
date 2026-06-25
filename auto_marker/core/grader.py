@@ -240,6 +240,8 @@ def summarize_by_question(graded: list[dict],
             "all_correct": correct == total and total > 0,
             "marker_bbox": marker_bbox,
             "question_type": question_type,
+            # 取最后一个正确字符的 bbox 右下角作为对勾锚点
+            "answer_bbox": items[-1]["bbox_pixel"] if items else None,
         }
 
     # 统计日志
