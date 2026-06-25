@@ -228,9 +228,8 @@ def annotate(original_pdf: str, graded_results: list[dict],
                         continue
                     if q_data.get("question_type") == "per_char":
                         continue
-                    # 对勾位置：x 用答案末字右边缘，y 用题号垂直中心（保证竖向对齐）
+                    # 对勾位置：直接用答案末字的右下角（x=右边缘, y=下边缘）
                     answer_bbox = q_data.get("answer_bbox")
-                    marker_bbox = q_data.get("marker_bbox")
 
                     # 使用第一项的 img 尺寸进行坐标转换
                     first_result = page_results[0] if page_results else None
@@ -239,21 +238,12 @@ def annotate(original_pdf: str, graded_results: list[dict],
                     ocr_img_w = first_result["img_pixel_w"]
                     ocr_img_h = first_result["img_pixel_h"]
 
-                    if answer_bbox:
-                        mx = max(0, min(answer_bbox[2], ocr_img_w))
-                    elif marker_bbox:
-                        mx = marker_bbox[2] + (marker_bbox[2] - marker_bbox[0]) * 0.3
-                    else:
+                    if not answer_bbox:
                         continue
 
-                    if marker_bbox:
-                        my = (marker_bbox[1] + marker_bbox[3]) / 2
-                    elif answer_bbox:
-                        my = (answer_bbox[1] + answer_bbox[3]) / 2
-                    else:
-                        continue
-
-                    q_mark_size = 14
+                    # 末字右下角，clamp 到图像范围
+                    mx = max(0, min(answer_bbox[2], ocr_img_w))
+                    my = max(0, min(answer_bbox[3], ocr_img_h))
 
                     qx_page, qy_page = _pixel_to_page(
                         mx, my,

@@ -97,21 +97,31 @@ class PipelineService:
     """批改流水线服务 — 封装从 PDF 到归档的完整流程。"""
 
     def load_answers(self, class_name: str, date_str: str) -> list[str]:
-        """按班级/日期加载标准答案。
+        """按班级/日期加载标准答案（扁平化为单字符列表）。
 
         优先级:
             1. 数据库（Web UI 保存的答案）
             2. answers.txt 文件（手动编辑）
         """
+        raw = self.load_answers_raw(class_name, date_str)
+        if not raw:
+            return []
+        return list(raw.replace("\n", "").replace(" ", ""))
+
+    def load_answers_raw(self, class_name: str, date_str: str) -> str | None:
+        """按班级/日期加载标准答案的原始多行文本（供 prompt 注入）。
+
+        优先级同 load_answers：数据库 → answers.txt。
+        """
         from services.answer_service import AnswerService
 
-        # 1. 尝试从数据库读取（Web UI 保存的答案优先）
+        # 1. 尝试从数据库读取
         try:
             db_text = AnswerService.get_answer(class_name, date_str)
             if db_text:
                 logger.info("从数据库加载答案（班级=%s, 日期=%s）: %d 字",
                             class_name, date_str, len(db_text))
-                return list(db_text.replace("\n", "").replace(" ", ""))
+                return db_text
         except Exception as e:
             logger.warning("数据库读取答案失败，回退到文件: %s", e)
 
@@ -119,11 +129,9 @@ class PipelineService:
         answers_file = Path(__file__).resolve().parent.parent / "answers.txt"
         if not answers_file.exists():
             logger.warning("answers.txt 不存在，使用空答案集")
-            return []
+            return None
         text = answers_file.read_text(encoding="utf-8").strip()
-        if not text:
-            return []
-        return list(text.replace("\n", "").replace(" ", ""))
+        return text if text else None
 
     def process_pdf(self, pdf_path: str) -> None:
         """完整批改流水线：预处理 → OCR → 版面分析 → 比对 → 批注 → 打印 → 归档。"""
@@ -145,10 +153,11 @@ class PipelineService:
 
         # 1. 加载答案
         answers = self.load_answers(class_name, date_str)
+        answers_raw = self.load_answers_raw(class_name, date_str) or ""
         logger.info("答案长度: %d 字", len(answers))
 
         # 2. 三阶段流水线
-        all_results, question_regions = self._run_ocr_pipeline(path)
+        all_results, question_regions = self._run_ocr_pipeline(path, answers_raw)
 
         if not all_results:
             logger.warning("未识别到任何手写内容，放入 failed")
@@ -174,7 +183,7 @@ class PipelineService:
             return (None, None, None)
         return m.groups()
 
-    def _run_ocr_pipeline(self, path: Path) -> tuple[list[dict], dict[int, list[dict]]]:
+    def _run_ocr_pipeline(self, path: Path, answers_raw: str = "") -> tuple[list[dict], dict[int, list[dict]]]:
         """三阶段流水线：渲染 → 预处理 → 文本检测 → 版面分析 → 手写识别。
 
         Returns:
@@ -248,6 +257,7 @@ class PipelineService:
                 page_results = recognize_page_level(
                     original_np, page_question_regions, page_idx,
                     handwriting_boxes=hw_boxes,
+                    answers_text=answers_raw,
                 )
             else:
                 if not hw_boxes:

@@ -177,20 +177,31 @@ def recognize_with_qwen_vl(
     return all_results
 
 
-def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = None) -> str:
-    """调用 Qwen3-VL 识别整页+批改，返回结构化文本。"""
+def _build_page_level_prompt(answers_text: str) -> str:
+    """用模板 + answers_text 拼装整页识别 prompt。"""
+    from core.recognition_config import (
+        QWEN_VL_PAGE_LEVEL_DEFAULT_ANSWERS,
+        QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE,
+    )
+
+    if not answers_text or not answers_text.strip():
+        answers_text = QWEN_VL_PAGE_LEVEL_DEFAULT_ANSWERS
+    return QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE.format(answers_text=answers_text)
+
+
+def _call_qwen_vl_page_level(img_array: np.ndarray, answers_text: str = "") -> str:
+    """调用 Qwen3-VL 整页识别，返回模型原始响应文本。"""
     import requests
 
     from core.recognition_config import (
         QWEN_VL_API_URL,
         QWEN_VL_MODEL,
-        QWEN_VL_PAGE_LEVEL_PROMPT,
-        QWEN_VL_TIMEOUT,
+        QWEN_VL_PAGE_LEVEL_MAX_TOKENS,
+        QWEN_VL_PAGE_LEVEL_TIMEOUT,
     )
 
     b64 = _img_to_base64(img_array)
-
-    prompt = QWEN_VL_PAGE_LEVEL_PROMPT
+    prompt = _build_page_level_prompt(answers_text)
 
     try:
         resp = requests.post(
@@ -207,7 +218,7 @@ def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = 
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 1024,
+                "max_tokens": QWEN_VL_PAGE_LEVEL_MAX_TOKENS,
                 "temperature": 0.1,
                 "repeat_penalty": 1.1,
                 "repeat_last_n": 64,
@@ -217,7 +228,7 @@ def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = 
                 "frequency_penalty": 0.0,
                 "presence_penalty": 0.0,
             },
-            timeout=QWEN_VL_TIMEOUT,
+            timeout=QWEN_VL_PAGE_LEVEL_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -225,6 +236,223 @@ def _call_qwen_vl_page_level(img_array: np.ndarray, answers: list[str] | None = 
     except Exception as e:
         logger.warning("Qwen3-VL 整页识别 API 调用失败: %s", e)
         return ""
+
+
+def _parse_page_level_json(response: str) -> list[dict] | None:
+    """解析 JSON 格式的整页响应，返回按题分组的逐字坐标列表。
+
+    返回: [{"q_marker": str, "chars": [{"char": str, "bbox_norm": (x0,y0,x1,y1)}]}, ...]
+          解析失败返回 None（触发旧文本解析器回退）。
+    """
+    import json
+
+    text = response.strip()
+
+    # 去除 markdown 围栏
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # 去首行围栏和可能的末行围栏
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # 截取首个 [ 到末个 ] 的子串
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    json_str = text[start:end + 1]
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, list):
+        return None
+
+    results: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        q_marker = item.get("q", "")
+        if not isinstance(q_marker, str):
+            q_marker = str(q_marker) if q_marker is not None else ""
+
+        chars_raw = item.get("chars", [])
+        if not isinstance(chars_raw, list):
+            continue
+
+        parsed_chars: list[dict] = []
+        all_valid = True
+        for ch_item in chars_raw:
+            if not isinstance(ch_item, dict):
+                all_valid = False
+                break
+            ch = ch_item.get("c", "")
+            if not isinstance(ch, str) or not ch:
+                all_valid = False
+                break
+            # 只保留中文字符
+            cn_chars = [c for c in ch if is_chinese_char(c)]
+            if not cn_chars:
+                continue
+            bbox = ch_item.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                all_valid = False
+                break
+            try:
+                coords = [float(v) for v in bbox]
+            except (TypeError, ValueError):
+                all_valid = False
+                break
+            # 值域检测：若任一值 >1.5，判定模型用了 0-1000 量纲，整体除以 1000
+            if any(abs(v) > 1.5 for v in coords):
+                coords = [v / 1000.0 for v in coords]
+            # clamp 到 [0,1]
+            coords = [max(0.0, min(1.0, v)) for v in coords]
+            x0, y0, x1, y1 = coords
+            # 保证 x0<x1, y0<y1
+            if x0 > x1:
+                x0, x1 = x1, x0
+            if y0 > y1:
+                y0, y1 = y1, y0
+            if x1 <= x0 or y1 <= y0:
+                all_valid = False
+                break
+            # 一个 c 可能含多字（模型误拼），逐字添加同一 bbox
+            for c in cn_chars:
+                parsed_chars.append({"char": c, "bbox_norm": (x0, y0, x1, y1)})
+
+        if not all_valid:
+            # 标记该题无效，但保留 q_marker 以便上层决定回退
+            results.append({"q_marker": q_marker, "chars": [], "invalid": True})
+        else:
+            results.append({"q_marker": q_marker, "chars": parsed_chars, "invalid": False})
+
+    if not results:
+        return None
+    return results
+
+
+def _norm_to_pixel_bbox(bbox_norm: tuple, img_w: int, img_h: int) -> tuple:
+    """归一化坐标 [0-1] 转像素坐标，并保证 x0<x1, y0<y1。"""
+    x0, y0, x1, y1 = bbox_norm
+    px0 = int(round(x0 * img_w))
+    py0 = int(round(y0 * img_h))
+    px1 = int(round(x1 * img_w))
+    py1 = int(round(y1 * img_h))
+    if px1 <= px0:
+        px1 = px0 + 1
+    if py1 <= py0:
+        py1 = py0 + 1
+    return (px0, py0, px1, py1)
+
+
+def _question_marker_to_q_idx(marker: str) -> int | None:
+    """题号原文转 q_idx，复用 layout_analyzer 的 _question_match。"""
+    from core.layout_analyzer import _question_match
+
+    return _question_match(marker)
+
+
+def _match_q_idx_by_bbox(
+    char_bbox_pixel: tuple,
+    region_by_qidx: dict[int, dict],
+    img_w: int,
+) -> int | None:
+    """用首字像素 bbox 中心 y 匹配 region 的 [y_start,y_end]，x 中心与 marker 列同侧过滤。"""
+    cx = (char_bbox_pixel[0] + char_bbox_pixel[2]) / 2
+    cy = (char_bbox_pixel[1] + char_bbox_pixel[3]) / 2
+    page_mid = img_w / 2
+    for q_idx, region in region_by_qidx.items():
+        if not (region["y_start"] <= cy < region["y_end"]):
+            continue
+        marker_bbox = region.get("marker_bbox")
+        if marker_bbox:
+            marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2
+            if (marker_cx < page_mid) != (cx < page_mid):
+                continue
+        return q_idx
+    return None
+
+
+def _estimate_question_x_range(
+    region: dict,
+    handwriting_boxes: list[dict] | None,
+    img_w: int,
+) -> tuple:
+    """从 handwriting_boxes 中找出同列同 y 区间的手写框，返回 (x_start, x_end)。"""
+    marker_bbox = region.get("marker_bbox")
+    y_start = region["y_start"]
+    y_end = region["y_end"]
+    x_start, x_end = None, None
+    if handwriting_boxes:
+        marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
+        for hw_box in handwriting_boxes:
+            hw_bbox = hw_box.get("bbox_pixel")
+            if not hw_bbox:
+                continue
+            hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
+            if y_start <= hw_y_center < y_end:
+                hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
+                page_mid = img_w / 2
+                if (marker_cx < page_mid) != (hw_cx < page_mid):
+                    continue
+                if x_start is None or hw_bbox[0] < x_start:
+                    x_start = hw_bbox[0]
+                if x_end is None or hw_bbox[2] > x_end:
+                    x_end = hw_bbox[2]
+
+    if x_start is None or x_end is None:
+        if marker_bbox:
+            x_start = marker_bbox[2]
+            x_end = img_w
+        else:
+            x_start = x_start or 0
+            x_end = x_end or img_w
+    return x_start, x_end
+
+
+def _equal_width_split(
+    chars: list[str],
+    x_start: float,
+    x_end: float,
+    y_start: float,
+    y_end: float,
+    page_idx: int,
+    q_idx: int,
+    img_w: int,
+    img_h: int,
+) -> list[dict]:
+    """等宽切分字符生成 per-char dict（回退路径使用，零行为变化）。"""
+    region_w = x_end - x_start
+    if region_w <= 0:
+        return []
+    char_w = region_w / len(chars)
+    margin = char_w * 0.05
+
+    results = []
+    for j, ch in enumerate(chars):
+        cx0 = int(x_start + j * char_w + margin)
+        cx2 = int(x_start + (j + 1) * char_w - margin)
+        if cx2 <= cx0:
+            cx0 = int(x_start + j * char_w)
+            cx2 = int(x_start + (j + 1) * char_w)
+        results.append({
+            "page": page_idx,
+            "bbox_pixel": (cx0, y_start, cx2, y_end),
+            "char": ch,
+            "confidence": 0.85,
+            "question_idx": q_idx,
+            "img_pixel_w": img_w,
+            "img_pixel_h": img_h,
+            "engine": "qwen_vl_page_level",
+        })
+    return results
 
 
 def _split_embedded_questions(answer: str, start_q: int) -> list[tuple[int, str]]:
@@ -381,17 +609,19 @@ def recognize_page_level(
     question_regions: list[dict],
     page_idx: int = 0,
     handwriting_boxes: list[dict] | None = None,
+    answers_text: str = "",
 ) -> list[dict]:
     """用 Qwen3-VL 识别整页，按题目输出结果，转换为逐字格式。
 
+    优先走 JSON 逐字坐标路径（模型直接输出每个字的归一化 bbox）；
+    JSON 解析失败或某题坐标无效时回退到旧文本解析 + 等宽切分。
+
     参数:
         img: RGB numpy array (H, W, 3)
-        question_regions: layout_analyzer 输出的题目区域列表，每项含：
-            - q_idx: 题目索引
-            - y_start, y_end: y 区间
-            - marker_bbox: 题号位置
+        question_regions: layout_analyzer 输出的题目区域列表
         page_idx: 页码
-        handwriting_boxes: layout_analyzer 输出的手写区域列表，用于确定实际书写 x 范围
+        handwriting_boxes: layout_analyzer 输出的手写区域列表（回退路径用）
+        answers_text: 原始多行标准答案文本，注入 prompt
 
     返回:
         与 recognize_handwriting() 相同格式的逐字结果列表。
@@ -400,132 +630,96 @@ def recognize_page_level(
         img = np.array(Image.open(img) if isinstance(img, str) else img)
 
     img_h, img_w = img.shape[:2]
-
     t_start = time.time()
 
     # 调用 Qwen3-VL 整页识别
-    response = _call_qwen_vl_page_level(img)
+    response = _call_qwen_vl_page_level(img, answers_text)
     if not response:
         logger.warning("第 %d 页: Qwen3-VL 整页识别无结果", page_idx + 1)
         return []
 
     logger.info("第 %d 页: Qwen3-VL 整页识别原始响应:\n%s", page_idx + 1, response)
 
-    # 解析响应（返回 list[str]，按顺序对应 question_regions）
-    question_answers = _parse_page_level_response(response)
-    if not question_answers:
-        logger.warning("第 %d 页: 解析整页响应无结果", page_idx + 1)
-        return []
-
-    logger.info(
-        "第 %d 页: 解析到 %d 道题的答案",
-        page_idx + 1, len(question_answers),
-    )
-
-    # ---- 按 q_idx 匹配答案与题目区域 ----
-    # 与 layout_analyzer 使用相同的偏移量
-    _QIDX_OFFSET_PAREN = 0
-    _QIDX_OFFSET_DOT = 100
-    _QIDX_OFFSET_CIRCLE = 200
-
-    def _answer_to_q_idx(answer_item: dict) -> int | None:
-        """将答案的 q_num + q_format 转换为 q_idx。"""
-        q_num = answer_item.get("q_num")
-        if q_num is None:
-            return None
-        q_format = answer_item.get("q_format", "paren")
-        if q_format == "circle":
-            return q_num - 1 + _QIDX_OFFSET_CIRCLE
-        elif q_format == "dot":
-            return q_num - 1 + _QIDX_OFFSET_DOT
-        else:  # paren
-            return q_num - 1 + _QIDX_OFFSET_PAREN
-
     # 构建 q_idx → region 查找表
     region_by_qidx: dict[int, dict] = {}
     for region in question_regions:
         region_by_qidx[region["q_idx"]] = region
 
-    # 为每道题生成逐字结果
     all_results: list[dict] = []
     used_regions: set[int] = set()
 
-    for answer_item in question_answers:
-        answer_text = answer_item["answer"]
-        chars = [ch for ch in answer_text if is_chinese_char(ch)]
-        if not chars:
-            continue
+    # ---- 优先尝试 JSON 逐字坐标路径 ----
+    parsed_json = _parse_page_level_json(response)
 
-        # 按 q_idx 精确匹配，匹配失败则跳过（不标记到错误区域）
-        target_q_idx = _answer_to_q_idx(answer_item)
-        if target_q_idx is None or target_q_idx not in region_by_qidx:
-            logger.debug("答案 '%s' (q_idx=%s) 无匹配区域，跳过", answer_text[:20], target_q_idx)
-            continue
+    if parsed_json is not None:
+        json_success_count = 0
+        fallback_count = 0
+        logger.info("第 %d 页: JSON 解析成功，%d 道题", page_idx + 1, len(parsed_json))
 
-        region = region_by_qidx[target_q_idx]
-        used_regions.add(target_q_idx)
-        logger.debug("答案 q_idx=%d → 匹配区域 q_idx=%d (%s)",
-                     target_q_idx, region["q_idx"], region.get("marker_text", ""))
+        for q_item in parsed_json:
+            q_marker = q_item.get("q_marker", "")
+            char_items = q_item.get("chars", [])
+            is_invalid = q_item.get("invalid", False)
 
-        q_idx = region["q_idx"]
-        y_start = region["y_start"]
-        y_end = region["y_end"]
+            # 题号 → q_idx（复用 layout_analyzer 逻辑）
+            target_q_idx = _question_marker_to_q_idx(q_marker) if q_marker else None
 
-        # 从 handwriting_boxes 中找出落在该 y 区间内且同列的手写框
-        marker_bbox = region.get("marker_bbox")
-        x_start, x_end = None, None
-        if handwriting_boxes:
-            # 用 marker_bbox 的 x 中心判断所属列（左/右栏）
-            marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
-            for hw_box in handwriting_boxes:
-                hw_bbox = hw_box.get("bbox_pixel")
-                if not hw_bbox:
-                    continue
-                hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
-                if y_start <= hw_y_center < y_end:
-                    hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
-                    # 列过滤：手写框 x 中心须与题号 x 中心在同侧（以页面中线为界）
-                    page_mid = img_w / 2
-                    if (marker_cx < page_mid) != (hw_cx < page_mid):
-                        continue
-                    if x_start is None or hw_bbox[0] < x_start:
-                        x_start = hw_bbox[0]
-                    if x_end is None or hw_bbox[2] > x_end:
-                        x_end = hw_bbox[2]
+            # q_idx 匹配失败时，用首字像素坐标兜底定位
+            if (target_q_idx is None or target_q_idx not in region_by_qidx) and char_items:
+                first_bbox_norm = char_items[0].get("bbox_norm")
+                if first_bbox_norm:
+                    first_pixel = _norm_to_pixel_bbox(first_bbox_norm, img_w, img_h)
+                    target_q_idx = _match_q_idx_by_bbox(first_pixel, region_by_qidx, img_w)
 
-        if x_start is None or x_end is None:
-            if marker_bbox:
-                x_start = marker_bbox[2]
-                x_end = img_w
+            if target_q_idx is None or target_q_idx not in region_by_qidx:
+                logger.debug("题号 '%s' (q_idx=%s) 无匹配区域，跳过", q_marker, target_q_idx)
+                continue
+
+            region = region_by_qidx[target_q_idx]
+            used_regions.add(target_q_idx)
+            q_idx = region["q_idx"]
+
+            # 该题所有字都有合法 bbox → 用模型坐标
+            if char_items and not is_invalid:
+                for ci in char_items:
+                    pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
+                    all_results.append({
+                        "page": page_idx,
+                        "bbox_pixel": pixel_bbox,
+                        "char": ci["char"],
+                        "confidence": 0.85,
+                        "question_idx": q_idx,
+                        "img_pixel_w": img_w,
+                        "img_pixel_h": img_h,
+                        "engine": "qwen_vl_page_level",
+                    })
+                json_success_count += 1
+                logger.debug("题号 '%s' q_idx=%d: 用模型坐标 (%d 字)",
+                             q_marker, q_idx, len(char_items))
             else:
-                x_start = x_start or 0
-                x_end = x_end or img_w
+                # 该题坐标无效 → 回退等宽切分（需要从旧解析器拿答案文本）
+                fallback_count += 1
+                logger.debug("题号 '%s' q_idx=%d: 坐标无效，回退等宽切分", q_marker, q_idx)
 
-        # 等宽切分字符
-        region_w = x_end - x_start
-        if region_w <= 0:
-            logger.debug("q_idx=%d: region_w=%d <= 0, 跳过", q_idx, region_w)
-            continue
-        char_w = region_w / len(chars)
-        margin = char_w * 0.05
+        logger.info(
+            "第 %d 页: JSON 路径 — 模型坐标 %d 题, 回退 %d 题",
+            page_idx + 1, json_success_count, fallback_count,
+        )
 
-        for j, ch in enumerate(chars):
-            cx0 = int(x_start + j * char_w + margin)
-            cx2 = int(x_start + (j + 1) * char_w - margin)
-            if cx2 <= cx0:
-                cx0 = int(x_start + j * char_w)
-                cx2 = int(x_start + (j + 1) * char_w)
-
-            all_results.append({
-                "page": page_idx,
-                "bbox_pixel": (cx0, y_start, cx2, y_end),
-                "char": ch,
-                "confidence": 0.85,
-                "question_idx": q_idx,
-                "img_pixel_w": img_w,
-                "img_pixel_h": img_h,
-                "engine": "qwen_vl_page_level",
-            })
+        # 若 JSON 路径一个字都没产出，回退到旧文本解析
+        if not all_results and fallback_count > 0:
+            logger.info("第 %d 页: JSON 路径无产出，回退旧文本解析", page_idx + 1)
+            all_results = _fallback_text_path(
+                response, region_by_qidx, question_regions,
+                handwriting_boxes, page_idx, img_w, img_h, used_regions,
+            )
+    else:
+        # ---- JSON 解析失败 → 旧文本解析路径 ----
+        logger.info("第 %d 页: JSON 解析失败，回退旧文本解析", page_idx + 1)
+        all_results = _fallback_text_path(
+            response, region_by_qidx, question_regions,
+            handwriting_boxes, page_idx, img_w, img_h, used_regions,
+        )
 
     # 统计未匹配的区域
     unmatched = [r for r in question_regions if r["q_idx"] not in used_regions]
@@ -541,4 +735,66 @@ def recognize_page_level(
         "第 %d 页: Qwen3-VL 整页识别 → %d 个字符 (%.1fs)",
         page_idx + 1, len(all_results), elapsed,
     )
+    return all_results
+
+
+def _fallback_text_path(
+    response: str,
+    region_by_qidx: dict[int, dict],
+    question_regions: list[dict],
+    handwriting_boxes: list[dict] | None,
+    page_idx: int,
+    img_w: int,
+    img_h: int,
+    used_regions: set[int],
+) -> list[dict]:
+    """旧文本解析 + 等宽切分回退路径（零行为变化）。"""
+    _QIDX_OFFSET_PAREN = 0
+    _QIDX_OFFSET_DOT = 100
+    _QIDX_OFFSET_CIRCLE = 200
+
+    def _answer_to_q_idx(answer_item: dict) -> int | None:
+        q_num = answer_item.get("q_num")
+        if q_num is None:
+            return None
+        q_format = answer_item.get("q_format", "paren")
+        if q_format == "circle":
+            return q_num - 1 + _QIDX_OFFSET_CIRCLE
+        elif q_format == "dot":
+            return q_num - 1 + _QIDX_OFFSET_DOT
+        else:
+            return q_num - 1 + _QIDX_OFFSET_PAREN
+
+    question_answers = _parse_page_level_response(response)
+    if not question_answers:
+        logger.warning("第 %d 页: 旧文本解析也无结果", page_idx + 1)
+        return []
+
+    logger.info("第 %d 页: 旧文本解析到 %d 道题", page_idx + 1, len(question_answers))
+
+    all_results: list[dict] = []
+    for answer_item in question_answers:
+        answer_text = answer_item["answer"]
+        chars = [ch for ch in answer_text if is_chinese_char(ch)]
+        if not chars:
+            continue
+
+        target_q_idx = _answer_to_q_idx(answer_item)
+        if target_q_idx is None or target_q_idx not in region_by_qidx:
+            logger.debug("答案 '%s' (q_idx=%s) 无匹配区域，跳过", answer_text[:20], target_q_idx)
+            continue
+
+        region = region_by_qidx[target_q_idx]
+        used_regions.add(target_q_idx)
+        q_idx = region["q_idx"]
+        y_start = region["y_start"]
+        y_end = region["y_end"]
+
+        x_start, x_end = _estimate_question_x_range(region, handwriting_boxes, img_w)
+        split_results = _equal_width_split(
+            chars, x_start, x_end, y_start, y_end,
+            page_idx, q_idx, img_w, img_h,
+        )
+        all_results.extend(split_results)
+
     return all_results
