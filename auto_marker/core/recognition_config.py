@@ -56,6 +56,11 @@ QWEN_VL_PAGE_LEVEL_TIMEOUT = 120
 # False = 用原始 PDF 图像（遵守硬约束）；True = 仅做 deskew 后送 VL
 QWEN_VL_USE_DESKEW = False
 
+# P3: 文字渲染模式开关
+# True = 将识别文字直接渲染到模型 bbox 位置（覆盖原文），跳过坐标 clamp
+# False = 传统标记模式（勾/圈/三角），启用坐标 clamp 修正
+RENDER_TEXT_MODE = True
+
 # ---- 双路合并策略 ----
 # "paddle_priority": PaddleOCR 为主，Qwen3-VL 仅在低置信度时覆盖
 # "qwen_priority": Qwen3-VL 文本为主，PaddleOCR 提供 bbox

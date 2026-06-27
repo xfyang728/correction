@@ -543,6 +543,73 @@ def _estimate_question_x_range(
     return x_start, x_end
 
 
+def _estimate_question_y_range(
+    region: dict,
+    handwriting_boxes: list[dict] | None,
+    img_h: int,
+) -> tuple:
+    """从 handwriting_boxes 中找出同列同 y 区间的手写框，返回实际 (y_start, y_end)。
+
+    当 region 过大（如整个下半页）时，用 handwriting_boxes 的实际书写 y 范围替代，
+    防止字符 bbox 被拉到 region 底部（P2-6 下联问题）。
+    """
+    y_start = region["y_start"]
+    y_end = region["y_end"]
+    region_h = y_end - y_start
+
+    # region 过大（>400px）且 handwriting_boxes 可用时，用实际书写 y 范围
+    if region_h > 400 and handwriting_boxes:
+        marker_bbox = region.get("marker_bbox")
+        marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_h / 2
+        hw_ys = []
+        for hw_box in handwriting_boxes:
+            hw_bbox = hw_box.get("bbox_pixel")
+            if not hw_bbox:
+                continue
+            hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
+            hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
+            page_mid = img_h  # 用 img_h 避免与 x 列判断冲突
+            if (marker_cx < page_mid) == (hw_cx < page_mid):
+                hw_ys.append((hw_bbox[1], hw_bbox[3]))
+        if hw_ys:
+            actual_y_start = min(y for y, _ in hw_ys)
+            actual_y_end = max(y for _, y in hw_ys)
+            # 只在实际范围比 region 范围更紧凑时使用
+            if actual_y_end - actual_y_start < region_h * 0.7:
+                logger.debug("region 过大 (%dpx)，用 handwriting_boxes y 范围替代 (%dpx)",
+                             region_h, actual_y_end - actual_y_start)
+                return actual_y_start, actual_y_end
+
+    return y_start, y_end
+
+
+def _clamp_chars_y_to_region(
+    char_items: list[dict],
+    region: dict,
+    img_h: int,
+    handwriting_boxes: list[dict] | None = None,
+) -> list[dict]:
+    """将 chars 的 y 坐标约束到 region 的 y 范围内。
+
+    模型 bbox 的 y 可能系统性偏高/偏低，用 region y_start/y_end 约束，
+    同时保留模型的 x 坐标（x 通常更准）。
+    """
+    y_start, y_end = _estimate_question_y_range(region, handwriting_boxes, img_h)
+    if y_start >= y_end:
+        return char_items
+
+    clamped = []
+    for ci in char_items:
+        x0, y0, x1, y1 = ci["bbox_norm"]
+        # 将 y 约束到 region 范围内
+        new_y0 = max(y_start / img_h, min(y0, y_end / img_h))
+        new_y1 = max(y_start / img_h, min(y1, y_end / img_h))
+        if new_y1 <= new_y0:
+            new_y1 = new_y0 + 0.01
+        clamped.append({**ci, "bbox_norm": (x0, new_y0, x1, new_y1)})
+    return clamped
+
+
 def _equal_width_split(
     chars: list[str],
     x_start: float,
@@ -966,8 +1033,13 @@ def recognize_page_level(
                     logger.info("题号 '%s' q_idx=%d: 检测到合并题，已拆分 (%d 字 → %d 字)",
                                 q_marker, q_idx, len(char_items), len(split_results))
                 else:
-                    # P2-6: clamp 到列范围
-                    clamped_items = _clamp_chars_to_column(char_items, region, img_w, handwriting_boxes)
+                    # P3: 文字渲染模式 — 跳过坐标 clamp，直接使用模型原始坐标
+                    from core.recognition_config import RENDER_TEXT_MODE
+                    if RENDER_TEXT_MODE:
+                        clamped_items = char_items
+                    else:
+                        clamped_items = _clamp_chars_to_column(char_items, region, img_w, handwriting_boxes)
+                        clamped_items = _clamp_chars_y_to_region(clamped_items, region, img_h, handwriting_boxes)
                     # P1-4: 估算置信度
                     conf = _estimate_confidence(char_items, std_chars, is_invalid=False)
                     for ci in clamped_items:
@@ -992,9 +1064,11 @@ def recognize_page_level(
                 if std_chars:
                     x_start, x_end = _estimate_question_x_range(
                         region, handwriting_boxes, img_w)
+                    actual_y_start, actual_y_end = _estimate_question_y_range(
+                        region, handwriting_boxes, img_h)
                     split = _equal_width_split(
                         std_chars, x_start, x_end,
-                        region["y_start"], region["y_end"],
+                        actual_y_start, actual_y_end,
                         page_idx, q_idx, img_w, img_h,
                     )
                     # P1-4: invalid 题置信度 0.50
@@ -1085,6 +1159,11 @@ def _fallback_text_path(
         if not chars:
             continue
 
+        # 过滤理由文本：长度 >30 字的答案不应参与比对
+        if len(chars) > 30:
+            logger.debug("跳过理由文本（%d 字）: '%s'", len(chars), answer_text[:30])
+            continue
+
         target_q_idx = _answer_to_q_idx(answer_item)
         if target_q_idx is None or target_q_idx not in region_by_qidx:
             logger.debug("答案 '%s' (q_idx=%s) 无匹配区域，跳过", answer_text[:20], target_q_idx)
@@ -1093,12 +1172,12 @@ def _fallback_text_path(
         region = region_by_qidx[target_q_idx]
         used_regions.add(target_q_idx)
         q_idx = region["q_idx"]
-        y_start = region["y_start"]
-        y_end = region["y_end"]
+        actual_y_start, actual_y_end = _estimate_question_y_range(
+            region, handwriting_boxes, img_h)
 
         x_start, x_end = _estimate_question_x_range(region, handwriting_boxes, img_w)
         split_results = _equal_width_split(
-            chars, x_start, x_end, y_start, y_end,
+            chars, x_start, x_end, actual_y_start, actual_y_end,
             page_idx, q_idx, img_w, img_h,
         )
         all_results.extend(split_results)

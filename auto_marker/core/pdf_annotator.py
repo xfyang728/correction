@@ -1,12 +1,13 @@
 """
-PDF 批注生成 — 在原扫描 PDF 上叠加红圈/绿勾/橙三角。
+PDF 批注生成 — 在原扫描 PDF 上叠加红圈/绿勾/橙三角，或渲染识别文字。
 
 使用 pdfplumber 读取页面图片实际位置，
 reportlab 绘制批注图层，PyPDF2 合并。
 
-支持两种标记模式：
+支持三种标记模式：
   - 逐字模式（默认）：对每个字独立画勾/圈/三角
   - 按题模式：正确题号旁画大绿✓，错误字保留红圈/橙三角
+  - 文字渲染模式：将识别文字直接渲染到模型 bbox 位置
 """
 
 import io
@@ -16,8 +17,29 @@ from pathlib import Path
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 logger = logging.getLogger("annotator")
+
+# 注册中文字体（用于文字渲染模式）
+_FONT_PATHS = [
+    r"C:\Windows\Fonts\msyh.ttc",   # 微软雅黑
+    r"C:\Windows\Fonts\simhei.ttf",  # 黑体
+    r"C:\Windows\Fonts\simsun.ttc",  # 宋体
+]
+_CN_FONT_NAME = None
+for _fp in _FONT_PATHS:
+    try:
+        pdfmetrics.registerFont(TTFont("ChineseFont", _fp))
+        _CN_FONT_NAME = "ChineseFont"
+        logger.debug("注册中文字体: %s", _fp)
+        break
+    except Exception:
+        continue
+if not _CN_FONT_NAME:
+    logger.warning("未找到中文字体，文字渲染模式将使用 Helvetica（中文可能显示为方块）")
+    _CN_FONT_NAME = "Helvetica"
 
 
 def _pixel_to_page(x_pixel: float, y_pixel: float,
@@ -67,9 +89,55 @@ def _draw_uncertain_triangle(can: canvas.Canvas, x: float, y: float, radius: flo
     can.drawPath(p, fill=1, stroke=1)
 
 
+def _draw_text_at_bbox(can: canvas.Canvas, char: str,
+                        bbox_pixel: tuple, ocr_img_w: int, ocr_img_h: int,
+                        page_width: float, page_height: float,
+                        color: tuple = (0, 0, 0), alpha: float = 0.5):
+    """将识别文字渲染到 bbox 位置，覆盖原有文字。
+
+    参数:
+        char: 识别的汉字
+        bbox_pixel: (x0, y0, x1, y1) 像素坐标
+        ocr_img_w/h: OCR 图像尺寸
+        page_width/height: PDF 页面尺寸（点）
+        color: RGB 颜色三元组 (0~1)
+        alpha: 透明度 (0~1)，0.5 可透视原文
+    """
+    bx0, by0, bx2, by2 = bbox_pixel
+    # 转换到 PDF 页面坐标
+    x0_page, y0_page = _pixel_to_page(bx0, by0, ocr_img_w, ocr_img_h, page_width, page_height)
+    x1_page, y1_page = _pixel_to_page(bx2, by2, ocr_img_w, ocr_img_h, page_width, page_height)
+
+    # bbox 宽高（PDF 点）
+    bw = abs(x1_page - x0_page)
+    bh = abs(y1_page - y0_page)
+
+    # 字号：根据 bbox 高度自适应，最小 8pt，最大 24pt
+    font_size = max(min(bh * 0.9, 24), 8)
+
+    # 文字左下角（PDF 坐标系 y 向上）
+    text_x = min(x0_page, x1_page)
+    text_y = min(y0_page, y1_page) + bh * 0.1
+
+    # 半透明背景（增强可读性）
+    if alpha < 1.0:
+        can.saveState()
+        can.setFillColorRGB(color[0], color[1], color[2], alpha * 0.3)
+        can.rect(text_x - 1, text_y - 1, bw + 2, bh + 2, fill=1, stroke=0)
+        can.restoreState()
+
+    # 绘制文字
+    can.saveState()
+    can.setFont(_CN_FONT_NAME, font_size)
+    can.setFillColorRGB(color[0], color[1], color[2], alpha)
+    can.drawString(text_x, text_y, char)
+    can.restoreState()
+
+
 def annotate(original_pdf: str, graded_results: list[dict],
              output_dir: str | None = None,
-             question_summary: dict[int, dict] | None = None) -> str:
+             question_summary: dict[int, dict] | None = None,
+             render_text: bool = False) -> str:
     """
     在 PDF 上叠加批注。
 
@@ -82,6 +150,8 @@ def annotate(original_pdf: str, graded_results: list[dict],
                          - 正确题目：在题号旁画大绿✓
                          - 错误/存疑字：保留红圈/橙三角
                          - 正确字：不画单字勾（减少视觉噪音）
+        render_text: 若为 True，将识别文字直接渲染到 bbox 位置（覆盖原文），
+                     替代传统的勾/圈/三角标记
 
     返回:
         批注后的 PDF 路径
@@ -147,6 +217,7 @@ def annotate(original_pdf: str, graded_results: list[dict],
                 status = r["status"]
                 conf = r["confidence"]
                 q_idx = r.get("question_idx")
+                char = r.get("char", "")
 
                 ocr_img_w = r["img_pixel_w"]
                 ocr_img_h = r["img_pixel_h"]
@@ -160,6 +231,23 @@ def annotate(original_pdf: str, graded_results: list[dict],
                                    bbox, ocr_img_w, ocr_img_h)
                     continue
 
+                # ---- 文字渲染模式：将识别文字直接绘制到 bbox 位置 ----
+                if render_text and char:
+                    # 根据状态选择颜色：正确=绿，错误=红，存疑=橙
+                    if status == "wrong":
+                        color = (1, 0, 0)
+                    elif status == "uncertain":
+                        color = (1, 0.6, 0)
+                    else:
+                        color = (0, 0.6, 0)
+                    _draw_text_at_bbox(
+                        can, char, bbox, ocr_img_w, ocr_img_h,
+                        page.width, page.height,
+                        color=color, alpha=0.7,
+                    )
+                    continue
+
+                # ---- 传统标记模式（勾/圈/三角）----
                 # bbox 中心（用于红圈/橙三角，钳制到有效范围）
                 cx_pixel = max(0, min((bbox[0] + bbox[2]) / 2, ocr_img_w))
                 cy_pixel = max(0, min((bbox[1] + bbox[3]) / 2, ocr_img_h))

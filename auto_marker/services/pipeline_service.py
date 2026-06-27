@@ -389,7 +389,8 @@ class PipelineService:
         output_dir = Path(__file__).resolve().parent.parent / "data" / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         annotated_path = annotate(str(path), graded, str(output_dir),
-                                  question_summary=question_summary)
+                                  question_summary=question_summary,
+                                  render_text=True)
         logger.info("批注 PDF 已生成: %s", annotated_path)
 
         # 6. 打印
