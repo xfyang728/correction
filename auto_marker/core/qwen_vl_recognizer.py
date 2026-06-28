@@ -511,16 +511,51 @@ def _clamp_chars_to_column(
     return clamped
 
 
+def _find_answer_start_in_marker(marker_text: str, answer_text: str) -> int | None:
+    """在 marker_text 中查找 answer_text 的起始索引。
+
+    marker_text 是 OCR 识别的整行文字（如 "(1) 随君直到夜郎西"），
+    answer_text 是标准答案（如 "随君直到夜郎西"）。
+    返回答案首字在 marker_text 中的索引，未找到返回 None。
+    """
+    if not marker_text or not answer_text:
+        return None
+    # 精确匹配
+    idx = marker_text.find(answer_text)
+    if idx >= 0:
+        return idx
+    # 模糊匹配: 取答案首字在 marker_text 中的位置
+    first_char = answer_text[0]
+    idx = marker_text.find(first_char)
+    if idx >= 0:
+        return idx
+    return None
+
+
 def _estimate_question_x_range(
     region: dict,
     handwriting_boxes: list[dict] | None,
     img_w: int,
+    answer_text: str | None = None,
 ) -> tuple:
-    """从 handwriting_boxes 中找出同列同 y 区间的手写框，返回 (x_start, x_end)。"""
+    """估算答案文字的 x 范围 (x_start, x_end)。
+
+    改进: 如果提供 answer_text 且 marker_text 包含答案文字，
+    用比例估算裁掉题号区域，大幅提升等宽切分路径的 X 精度。
+
+    参数:
+        region: 题目区域 dict，含 marker_bbox, marker_text, y_start, y_end
+        handwriting_boxes: 手写框列表
+        img_w: 图片宽度
+        answer_text: 标准答案文字（用于在 marker_text 中定位答案起始位置）
+    """
     marker_bbox = region.get("marker_bbox")
+    marker_text = region.get("marker_text", "")
     y_start = region["y_start"]
     y_end = region["y_end"]
-    x_start, x_end = None, None
+
+    # ---- Step 1: 找同列手写框的 x 范围（现有逻辑，用于回退和窄 marker） ----
+    hw_x_start, hw_x_end = None, None
     if handwriting_boxes:
         marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
         for hw_box in handwriting_boxes:
@@ -533,19 +568,47 @@ def _estimate_question_x_range(
                 page_mid = img_w / 2
                 if (marker_cx < page_mid) != (hw_cx < page_mid):
                     continue
-                if x_start is None or hw_bbox[0] < x_start:
-                    x_start = hw_bbox[0]
-                if x_end is None or hw_bbox[2] > x_end:
-                    x_end = hw_bbox[2]
+                if hw_x_start is None or hw_bbox[0] < hw_x_start:
+                    hw_x_start = hw_bbox[0]
+                if hw_x_end is None or hw_bbox[2] > hw_x_end:
+                    hw_x_end = hw_bbox[2]
 
-    if x_start is None or x_end is None:
+    # ---- Step 2: 比例估算 — 用 marker_text 裁掉题号区域 ----
+    # marker_text 包含整行文字（题号+答案），如 "(1) 随君直到夜郎西"。
+    # 在其中找到答案起始位置，按比例计算 x_start。
+    if answer_text and marker_text and marker_bbox:
+        answer_start = _find_answer_start_in_marker(marker_text, answer_text)
+        if answer_start is not None and answer_start > 0:
+            total_chars = len(marker_text)
+            m_w = marker_bbox[2] - marker_bbox[0]
+            char_w = m_w / total_chars
+            x_start = int(marker_bbox[0] + answer_start * char_w)
+            # x_end: 答案结束位置 = x_start + 答案字数 * char_w
+            answer_chars = len(answer_text)
+            x_end = int(x_start + answer_chars * char_w)
+            # 不超过 marker_bbox 右边界
+            x_end = min(x_end, marker_bbox[2])
+            logger.debug(
+                "X-estimate: marker_text='%s' answer='%s' start_idx=%d "
+                "char_w=%.1f x_start=%d x_end=%d",
+                marker_text[:20], answer_text[:10], answer_start,
+                char_w, x_start, x_end,
+            )
+            return x_start, x_end
+
+    # ---- Step 3: 窄 marker 回退 — 答案在 marker 右侧 ----
+    # marker_bbox 宽度 < 200px 时，通常只有题号（如 "(2)"），答案在其右侧
+    if marker_bbox and (marker_bbox[2] - marker_bbox[0]) < 200:
+        x_start = marker_bbox[2]
+        x_end = hw_x_end if hw_x_end else img_w
+        return x_start, x_end
+
+    # ---- Step 4: 回退到手写框 x 范围（现有逻辑） ----
+    if hw_x_start is None or hw_x_end is None:
         if marker_bbox:
-            x_start = marker_bbox[2]
-            x_end = img_w
-        else:
-            x_start = x_start or 0
-            x_end = x_end or img_w
-    return x_start, x_end
+            return marker_bbox[2], img_w
+        return 0, img_w
+    return hw_x_start, hw_x_end
 
 
 # 手写框 y 跨度阈值：超过此值视为跨多行的大手写框，匹配时过滤掉
@@ -736,20 +799,32 @@ def _rescale_chars_x_to_region(
     img_w: int,
     handwriting_boxes: list[dict] | None = None,
     scale_threshold: float = 1.3,
+    offset_threshold_px: float = 80.0,
+    answer_text: str | None = None,
 ) -> list[dict]:
-    """P1-1: 当模型 x 跨度明显偏大时，按手写框 x 范围线性映射模型 x。
+    """按目标 x 范围线性映射模型 x，修正跨度偏大或整体偏移两种失效模式。
 
-    模型可能把双栏当单栏输出 x 坐标，导致 x 跨度比实际大 1.3-2 倍
-    （如题1 "随君直到夜郎西" 模型跨度 744px，手写框跨度 449px）。
-    检测：若某行模型 x 跨度 > 手写框 x 跨度 * scale_threshold，则线性映射。
+    触发条件（双重判断，任一满足即映射）:
+      1. 跨度偏大: model_span_px > hw_span_px * scale_threshold
+         （模型把双栏当单栏，x 跨度比实际大 1.3-2 倍）
+      2. 整体偏移: abs(model_x0_px - hw_x0) > offset_threshold_px
+         （模型 x 跨度正常但整体左偏/右移）
+
+    目标范围 [hw_x0, hw_x2] 由 _estimate_question_x_range 推导:
+      - 传 answer_text 时启用 Step 2（marker_text 比例裁剪），精度最高
+      - 未传 answer_text 时走 Step 3/4（窄 marker 或手写框回退）
+
+    线性映射保留模型逐字相对间距（标点后空隙等），只修正整体偏移和跨度。
     跨行题（模型 y 分多行）按行分别映射，保持每行内相对顺序。
 
     参数:
         char_items: 模型输出的逐字列表，每项含 bbox_norm (x0,y0,x1,y1)
-        region: 题目区域，含 marker_bbox, y_start, y_end
+        region: 题目区域，含 marker_bbox, marker_text, y_start, y_end
         img_w: 图像宽度（像素）
         handwriting_boxes: layout_analyzer 输出的手写区域列表
-        scale_threshold: 触发映射的跨度比阈值（默认 1.3）
+        scale_threshold: 跨度触发映射的比值阈值（默认 1.3）
+        offset_threshold_px: 偏移触发映射的像素阈值（默认 80）
+        answer_text: 标准答案文本，用于在 marker_text 中定位答案起始位置
 
     返回:
         新的 char_items 列表（x 可能被重映射，y 保留模型值）
@@ -757,8 +832,9 @@ def _rescale_chars_x_to_region(
     if not char_items:
         return char_items
 
-    # 获取手写框 x 范围（基于 marker 列 + y 区间过滤）
-    hw_x0, hw_x2 = _estimate_question_x_range(region, handwriting_boxes, img_w)
+    # 获取目标 x 范围（传 answer_text 启用 Step 2 比例裁剪）
+    hw_x0, hw_x2 = _estimate_question_x_range(
+        region, handwriting_boxes, img_w, answer_text=answer_text)
     if hw_x0 >= hw_x2:
         return char_items
 
@@ -786,13 +862,19 @@ def _rescale_chars_x_to_region(
         model_x0_norm = min(ci["bbox_norm"][0] for ci in row_items)
         model_x2_norm = max(ci["bbox_norm"][2] for ci in row_items)
         model_span_px = (model_x2_norm - model_x0_norm) * img_w
+        model_x0_px = model_x0_norm * img_w
 
-        if model_span_px <= hw_span_px * scale_threshold:
-            continue  # 模型 x 跨度合理，保留
+        # 双重判断：跨度或偏移超阈
+        span_exceed = model_span_px > hw_span_px * scale_threshold
+        offset_exceed = abs(model_x0_px - hw_x0) > offset_threshold_px
+        if not (span_exceed or offset_exceed):
+            continue  # 模型 x 合理，保留
 
-        # 线性映射到手写框 x 范围
-        any_rescaled = True
+        # 线性映射到目标 x 范围（保留模型相对间距）
         model_span_norm = model_x2_norm - model_x0_norm
+        if model_span_norm <= 0:
+            continue  # 单字或异常，跳过避免除零
+        any_rescaled = True
         hw_x0_norm = hw_x0 / img_w
         hw_x2_norm = hw_x2 / img_w
         hw_span_norm = hw_x2_norm - hw_x0_norm
@@ -805,7 +887,7 @@ def _rescale_chars_x_to_region(
 
     if any_rescaled:
         logger.debug(
-            "模型 x 跨度偏大，已按手写框 x 范围线性映射 (%d 字, hw_x=[%d,%d])",
+            "模型 x 已线性映射到目标范围 (%d 字, 目标 x=[%d,%d], 触发: 跨度或偏移超阈)",
             len(char_items), hw_x0, hw_x2,
         )
     return rescaled
@@ -1297,13 +1379,15 @@ def recognize_page_level(
                     logger.info("题号 '%s' q_idx=%d: 检测到合并题，已拆分 (%d 字 → %d 字)",
                                 q_marker, q_idx, len(char_items), len(split_results))
                 else:
-                    # P3: 文字渲染模式 — 保留模型 x 坐标，但仍然 clamp y（模型 y 系统性偏移）
+                    # P3: 文字渲染模式 — 修正模型 x 偏移/跨度，再 clamp y（模型 y 系统性偏移）
                     from core.recognition_config import RENDER_TEXT_MODE
                     if RENDER_TEXT_MODE:
-                        # 文字渲染模式：先修正 x 跨度偏大，再 clamp y
-                        # P1-1: 模型 x 跨度可能比实际大 1.3-2 倍，按手写框 x 范围线性映射
+                        # 文字渲染模式：双重判断（跨度或偏移超阈）线性映射 x 到目标范围
+                        # 传 answer_text 启用 marker_text 比例裁剪（Step 2），提升目标范围精度
+                        answer_text = "".join(std_chars) if std_chars else None
                         rescaled_items = _rescale_chars_x_to_region(
-                            char_items, region, img_w, handwriting_boxes)
+                            char_items, region, img_w, handwriting_boxes,
+                            answer_text=answer_text)
                         clamped_items = _clamp_chars_y_to_region(
                             rescaled_items, region, img_h, handwriting_boxes, img_w)
                     else:
@@ -1332,8 +1416,10 @@ def recognize_page_level(
                 fallback_count += 1
                 std_chars = std_answers_by_qidx.get(q_idx, [])
                 if std_chars:
+                    answer_text = "".join(std_chars)
                     x_start, x_end = _estimate_question_x_range(
-                        region, handwriting_boxes, img_w)
+                        region, handwriting_boxes, img_w,
+                        answer_text=answer_text)
                     actual_y_start, actual_y_end = _estimate_question_y_range(
                         region, handwriting_boxes, img_h, img_w)
                     split = _equal_width_split(
@@ -1445,7 +1531,8 @@ def _fallback_text_path(
         actual_y_start, actual_y_end = _estimate_question_y_range(
             region, handwriting_boxes, img_h, img_w)
 
-        x_start, x_end = _estimate_question_x_range(region, handwriting_boxes, img_w)
+        x_start, x_end = _estimate_question_x_range(
+            region, handwriting_boxes, img_w, answer_text="".join(chars))
         split_results = _equal_width_split(
             chars, x_start, x_end, actual_y_start, actual_y_end,
             page_idx, q_idx, img_w, img_h,

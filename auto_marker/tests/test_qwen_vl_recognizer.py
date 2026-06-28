@@ -18,7 +18,9 @@ sys.path.insert(0, str(ROOT))
 
 from core.qwen_vl_recognizer import (
     _clamp_chars_y_to_region,
+    _estimate_question_x_range,
     _estimate_question_y_range,
+    _find_answer_start_in_marker,
     _norm_to_pixel_bbox,
     _q_idx_format_range,
     _question_marker_to_q_idx,
@@ -301,6 +303,219 @@ class TestClampCharsYToRegion:
         expected_y1 = 874 / self.IMG_H
         assert abs(result[0]["bbox_norm"][1] - expected_y0) < 0.001
         assert abs(result[0]["bbox_norm"][3] - expected_y1) < 0.001
+
+
+# ============================================================
+# _find_answer_start_in_marker
+# ============================================================
+
+class TestFindAnswerStartInMarker:
+    """在 marker_text 中查找答案起始索引。"""
+
+    def test_exact_match(self):
+        """精确匹配: marker_text 含完整答案字符串。"""
+        # marker_text = "(1) 随君直到夜郎西", answer = "随君直到夜郎西"
+        idx = _find_answer_start_in_marker("(1) 随君直到夜郎西", "随君直到夜郎西")
+        assert idx == 4  # 答案首字在索引 4
+
+    def test_fuzzy_match_by_first_char(self):
+        """模糊匹配: 用答案首字定位（marker_text 含 OCR 误差）。"""
+        # marker_text 中答案被 OCR 改变，但首字相同
+        idx = _find_answer_start_in_marker("(1) 随君直到夜郎", "随君直到夜郎西")
+        assert idx == 4
+
+    def test_answer_at_start(self):
+        """marker_text 无题号（无题号格式如'下联'），答案在开头。"""
+        idx = _find_answer_start_in_marker("平凡物见证", "平凡物见证诉说追梦情")
+        # 首字 "平" 在索引 0
+        assert idx == 0
+
+    def test_circle_marker(self):
+        """带圈题号 ② 答案起始位置。"""
+        # marker_text = "② 染绚丽", answer = "染绚丽"
+        idx = _find_answer_start_in_marker("② 染绚丽", "染绚丽")
+        assert idx == 2  # "②" 占 1 个字符位 + 1 空格
+
+    def test_not_found(self):
+        """答案首字不在 marker_text 中 → 返回 None。"""
+        idx = _find_answer_start_in_marker("(1) 甲乙丙", "XYZ")
+        assert idx is None
+
+    def test_empty_inputs(self):
+        """空输入 → 返回 None。"""
+        assert _find_answer_start_in_marker("", "abc") is None
+        assert _find_answer_start_in_marker("abc", "") is None
+        assert _find_answer_start_in_marker(None, "abc") is None
+
+
+# ============================================================
+# _estimate_question_x_range
+# ============================================================
+
+class TestEstimateQuestionXRange:
+    """估算答案 x 范围 — 重点验证 answer_text 比例估算逻辑。"""
+
+    IMG_W = 1653
+
+    def test_proportional_estimate_with_answer_text(self):
+        """Step 2: 用 marker_text + answer_text 比例裁掉题号区域。
+
+        场景: marker_text="(1) 随君直到夜郎西", marker_bbox=(17, _, 655, _)
+              答案在 marker_text 索引 4（11 字中第 5 字起）
+              预期 x_start = 17 + 4/11 * (655-17) ≈ 249
+        """
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),
+            "marker_text": "(1) 随君直到夜郎西",  # 11 字符
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="随君直到夜郎西")
+        # 答案从索引 4 开始，char_w = 638/11 ≈ 58
+        # x_start = 17 + 4*58 = 249
+        # x_end = 249 + 7*58 = 655 (但 min(655, marker[2]=655) = 655)
+        assert x_start == 249, f"x_start={x_start}, 预期 249"
+        assert x_end == 655, f"x_end={x_end}, 预期 655"
+
+    def test_proportional_estimate_right_column(self):
+        """右列题目比例估算。"""
+        # marker_text = "(6) 半竿斜日旧关城", marker_bbox=(823, _, 1523, _)
+        # 答案 "半竿斜日旧关城" 在索引 4（11 字中第 5 字起）
+        region = {
+            "y_start": 1000,
+            "y_end": 1266,
+            "marker_bbox": (823, 990, 1523, 1086),
+            "marker_text": "(6) 半竿斜日旧关城",
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="半竿斜日旧关城")
+        # char_w = 700/11 ≈ 63.6
+        # x_start = 823 + 4*63.6 = 1077
+        # x_end = 1077 + 7*63.6 = 1522 (min(1522, 1523) = 1522)
+        assert x_start == 1077, f"x_start={x_start}, 预期 1077"
+        assert x_end == 1522, f"x_end={x_end}, 预期 1522"
+
+    def test_answer_at_marker_start_no_trim(self):
+        """答案在 marker_text 开头时（answer_start=0），不裁题号，回退到 Step 3/4。
+
+        场景: 无题号格式题目，marker_text == answer_text（答案在索引 0）
+              answer_start=0 → Step 2 条件 (>0) 不满足，跳过
+              marker 宽度 > 200 → Step 3 跳过
+              无手写框 → Step 4 回退 (marker_bbox[2], img_w)
+        """
+        region = {
+            "y_start": 1800,
+            "y_end": 2050,
+            "marker_bbox": (50, 1750, 1600, 2050),  # 宽 1550 > 200
+            "marker_text": "平凡物见证",  # 与 answer_text 完全相同
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="平凡物见证")
+        # Step 2 不触发（answer_start=0），Step 3 不触发（宽 > 200）
+        # Step 4: 无手写框，返回 (marker_bbox[2], img_w)
+        assert x_start == 1600
+        assert x_end == self.IMG_W
+
+    def test_narrow_marker_fallback(self):
+        """Step 3: 窄 marker (< 200px) 时，x_start = marker_bbox[2]。"""
+        # 无 answer_text，marker 宽度 100 < 200
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 117, 817),  # 宽 100
+            "marker_text": "(2)",
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text=None)
+        # Step 3: x_start = 117, x_end = img_w (无手写框)
+        assert x_start == 117
+        assert x_end == self.IMG_W
+
+    def test_narrow_marker_with_handwriting_box(self):
+        """Step 3: 窄 marker + 同列手写框 → x_end = 手写框 x_end。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 117, 817),  # 宽 100，左列
+            "marker_text": "(2)",
+        }
+        hw_boxes = [
+            {"bbox_pixel": (150, 738, 655, 817)},  # 左列，y_center 在 [746, 874)
+        ]
+        x_start, x_end = _estimate_question_x_range(
+            region, hw_boxes, self.IMG_W, answer_text=None)
+        # Step 1: hw_x_start=150, hw_x_end=655
+        # Step 3: x_start = 117, x_end = hw_x_end = 655
+        assert x_start == 117
+        assert x_end == 655
+
+    def test_fallback_to_handwriting_box_range(self):
+        """Step 4: 无 answer_text + 宽 marker → 回退到手写框 x 范围。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),  # 宽 638 > 200，左列
+            "marker_text": "(1) 随君直到夜郎西",
+        }
+        hw_boxes = [
+            {"bbox_pixel": (289, 738, 733, 817)},  # 左列，y_center 在范围内
+        ]
+        x_start, x_end = _estimate_question_x_range(
+            region, hw_boxes, self.IMG_W, answer_text=None)
+        # Step 4: 返回手写框 x 范围
+        assert x_start == 289
+        assert x_end == 733
+
+    def test_no_marker_bbox_no_handwriting(self):
+        """边界: 无 marker_bbox 且无手写框 → 返回 (0, img_w)。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": None,
+            "marker_text": "",
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text=None)
+        assert x_start == 0
+        assert x_end == self.IMG_W
+
+    def test_answer_text_not_in_marker_falls_back(self):
+        """answer_text 不在 marker_text 中 → 回退到 Step 3/4。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),  # 宽 638 > 200
+            "marker_text": "(1) 甲乙丙丁",
+        }
+        hw_boxes = [
+            {"bbox_pixel": (289, 738, 733, 817)},
+        ]
+        x_start, x_end = _estimate_question_x_range(
+            region, hw_boxes, self.IMG_W, answer_text="XYZ不存在")
+        # _find_answer_start_in_marker 返回 None → Step 2 跳过
+        # Step 3: 宽 638 > 200，跳过
+        # Step 4: 回退到手写框
+        assert x_start == 289
+        assert x_end == 733
+
+    def test_excludes_opposite_column_handwriting(self):
+        """Step 1: 排除对列手写框（左列 marker 不匹配右列手写框）。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),  # 左列
+            "marker_text": "(1) 答案",
+        }
+        hw_boxes = [
+            {"bbox_pixel": (919, 738, 1368, 817)},  # 右列，y_center 在范围内但不同列
+            {"bbox_pixel": (289, 738, 733, 817)},  # 左列
+        ]
+        x_start, x_end = _estimate_question_x_range(
+            region, hw_boxes, self.IMG_W, answer_text=None)
+        # Step 4: 只用左列手写框 → (289, 733)
+        assert x_start == 289
+        assert x_end == 733
 
 
 # ============================================================
