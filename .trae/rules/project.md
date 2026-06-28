@@ -23,7 +23,7 @@
 - 模型归一化坐标 [0-1] → 像素坐标：`x_pixel = x_norm * img_w`，`y_pixel = y_norm * img_h`
 - 像素坐标 → PDF 页面坐标：`x_page = x_pixel / img_w * page_width`，`y_page = page_height - y_pixel / img_h * page_height`
 - **Y 坐标必须 clamp**：Qwen3-VL 的 y 坐标系统性偏移，必须用 `_clamp_chars_y_to_region()` 替换为手写框 y 范围
-- **X 坐标保留模型值**：x 坐标通常更准，文字渲染模式下不做 x-clamp
+- **X 坐标修正策略**：文字渲染模式下，当模型 x 跨度偏大（>1.3×目标范围）或整体偏移（>80px）时，用 `_rescale_chars_x_to_region()` 线性映射到 marker_text+answer_text 推导的目标范围；偏差小时保留模型 x（保留逐字相对间距）
 - 圈号 q_idx（200+）不存在时，通过标记文本中的圈号字符回退匹配
 - 无题号格式的 q_marker 通过标记文本内容回退匹配
 

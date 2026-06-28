@@ -24,6 +24,7 @@ from core.qwen_vl_recognizer import (
     _norm_to_pixel_bbox,
     _q_idx_format_range,
     _question_marker_to_q_idx,
+    _rescale_chars_x_to_region,
 )
 
 
@@ -516,6 +517,150 @@ class TestEstimateQuestionXRange:
         # Step 4: 只用左列手写框 → (289, 733)
         assert x_start == 289
         assert x_end == 733
+
+
+# ============================================================
+# _rescale_chars_x_to_region
+# ============================================================
+
+class TestRescaleCharsXToRegion:
+    """model bbox 路径 X 重缩放 — 双重触发判断 + answer_text 启用 Step 2。"""
+
+    IMG_W = 1653
+
+    def _make_region(self, marker_bbox=(17, 675, 655, 817), marker_text="(1) 随君直到夜郎西"):
+        """构造左列题目区域。"""
+        return {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": marker_bbox,
+            "marker_text": marker_text,
+        }
+
+    def test_span_exceed_triggers_rescale(self):
+        """跨度偏大（>1.3×目标）触发线性映射。"""
+        # 模型跨度 744px（0.05~0.5 → 83~827px），目标跨度 449px（289~738）
+        # 744 > 449*1.3=584 → 触发
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]  # 目标范围 449px
+        char_items = [
+            {"char": "随", "bbox_norm": (0.05, 0.32, 0.10, 0.35)},  # 83px
+            {"char": "西", "bbox_norm": (0.45, 0.32, 0.50, 0.35)},  # 827px
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 映射后首字 x0 应接近目标 x_start=289
+        new_x0 = result[0]["bbox_norm"][0] * self.IMG_W
+        assert abs(new_x0 - 289) < 2, f"首字 x0={new_x0}, 预期 ≈289"
+        # 末字 x1 应接近目标 x_end=738
+        new_x1 = result[1]["bbox_norm"][2] * self.IMG_W
+        assert abs(new_x1 - 738) < 2, f"末字 x1={new_x1}, 预期 ≈738"
+
+    def test_offset_exceed_triggers_rescale(self):
+        """跨度正常但首字偏移 >80px 触发线性映射（退化为平移）。"""
+        # 目标范围 [289, 738]，跨度 449px
+        # 模型跨度 449px（正常），但首字在 100px（偏移 189px > 80）→ 触发
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        char_items = [
+            {"char": "随", "bbox_norm": (100/1653, 0.32, 150/1653, 0.35)},  # 100~150px
+            {"char": "西", "bbox_norm": (499/1653, 0.32, 549/1653, 0.35)},  # 499~549px
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 模型跨度 449 == 目标跨度 449，线性映射退化为平移
+        # 首字 x0 应从 100 → 289（平移 +189）
+        new_x0 = result[0]["bbox_norm"][0] * self.IMG_W
+        assert abs(new_x0 - 289) < 2, f"首字 x0={new_x0}, 预期 ≈289（平移修正）"
+
+    def test_both_ok_preserves_model_x(self):
+        """跨度正常且偏移 <80px → 保留模型 x 原值。"""
+        # 目标范围 [289, 738]，模型首字在 300px（偏移 11px < 80），跨度 400px < 449*1.3
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        char_items = [
+            {"char": "随", "bbox_norm": (300/1653, 0.32, 350/1653, 0.35)},
+            {"char": "西", "bbox_norm": (650/1653, 0.32, 700/1653, 0.35)},
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 应保留模型原值
+        assert result[0]["bbox_norm"][0] == char_items[0]["bbox_norm"][0]
+        assert result[1]["bbox_norm"][2] == char_items[1]["bbox_norm"][2]
+
+    def test_answer_text_enables_step2_target(self):
+        """传 answer_text 启用 Step 2，目标范围用 marker_text 比例裁剪。"""
+        # marker_text="(1) 随君直到夜郎西"，marker_bbox=(17,_,655,_)
+        # Step 2: answer_start=4, char_w=638/11≈58, x_start=17+4*58=249, x_end=655
+        # 不传 answer_text 时走 Step 4（手写框回退），目标范围=(289,738)
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        # 模型首字在 100px（偏移 149px > 80），触发重缩放
+        char_items = [
+            {"char": "随", "bbox_norm": (100/1653, 0.32, 150/1653, 0.35)},
+        ]
+        # 传 answer_text → Step 2 目标范围 (249, 655)
+        result_with = _rescale_chars_x_to_region(
+            char_items, region, self.IMG_W, hw_boxes,
+            answer_text="随君直到夜郎西")
+        new_x0_with = result_with[0]["bbox_norm"][0] * self.IMG_W
+        # 应映射到 Step 2 的 x_start=249（而非 Step 4 的 289）
+        assert abs(new_x0_with - 249) < 2, f"Step2 启用时 x0={new_x0_with}, 预期 ≈249"
+
+        # 不传 answer_text → Step 4 目标范围 (289, 738)
+        result_without = _rescale_chars_x_to_region(
+            char_items, region, self.IMG_W, hw_boxes)
+        new_x0_without = result_without[0]["bbox_norm"][0] * self.IMG_W
+        assert abs(new_x0_without - 289) < 2, f"Step4 回退时 x0={new_x0_without}, 预期 ≈289"
+
+    def test_no_answer_text_falls_back(self):
+        """不传 answer_text 时走 Step 3/4，行为同现状（向后兼容）。"""
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        # 模型跨度偏大触发
+        char_items = [
+            {"char": "随", "bbox_norm": (0.05, 0.32, 0.10, 0.35)},
+            {"char": "西", "bbox_norm": (0.45, 0.32, 0.50, 0.35)},
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 应映射到手写框范围 (289, 738)
+        new_x0 = result[0]["bbox_norm"][0] * self.IMG_W
+        assert abs(new_x0 - 289) < 2
+
+    def test_single_char_skipped(self):
+        """单字（model_span_norm=0）时不报错，保留原值。"""
+        # 单字 bbox x0==x1 → model_span_norm=0，应跳过
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        char_items = [
+            {"char": "随", "bbox_norm": (0.05, 0.32, 0.05, 0.35)},  # x0==x1
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 虽然偏移超阈，但 model_span_norm=0 → 跳过，保留原值
+        assert result[0]["bbox_norm"][0] == 0.05
+
+    def test_multi_row_rescale(self):
+        """跨行题，每行独立判断和映射。"""
+        # 行1: y=0.32, 模型 x 跨度偏大 → 映射
+        # 行2: y=0.50, 模型 x 合理 → 保留
+        region = self._make_region()
+        hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
+        char_items = [
+            # 行1 (y=0.32): 跨度 744px > 449*1.3 → 映射
+            {"char": "随", "bbox_norm": (0.05, 0.32, 0.10, 0.35)},
+            {"char": "西", "bbox_norm": (0.45, 0.32, 0.50, 0.35)},
+            # 行2 (y=0.50): 跨度 100px < 449*1.3, 偏移 11px < 80 → 保留
+            {"char": "君", "bbox_norm": (300/1653, 0.50, 350/1653, 0.53)},
+            {"char": "到", "bbox_norm": (380/1653, 0.50, 430/1653, 0.53)},
+        ]
+        result = _rescale_chars_x_to_region(char_items, region, self.IMG_W, hw_boxes)
+        # 行1 首字应被映射到 ≈289
+        assert abs(result[0]["bbox_norm"][0] * self.IMG_W - 289) < 2
+        # 行2 首字应保留原值 300
+        assert abs(result[2]["bbox_norm"][0] * self.IMG_W - 300) < 2
+
+    def test_empty_chars_returns_empty(self):
+        """空输入返回空列表。"""
+        region = self._make_region()
+        result = _rescale_chars_x_to_region([], region, self.IMG_W, None)
+        assert result == []
 
 
 # ============================================================
