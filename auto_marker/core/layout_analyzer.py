@@ -49,7 +49,7 @@ _CIRCLED_DIGITS = {
 
 
 def _question_match(text: str) -> int | None:
-    """从文本中提取题号，支持多种格式并分配唯一 q_idx。
+    """从文本中提取首个题号，支持多种格式并分配唯一 q_idx。
 
     不同格式使用不同偏移量，避免 (1) 与 ① 等冲突：
       - (1)/(2)/... → q_idx = digit - 1 + _QIDX_OFFSET_PAREN (0~99)
@@ -77,6 +77,37 @@ def _question_match(text: str) -> int | None:
     if matched in _CIRCLED_DIGITS:
         return _CIRCLED_DIGITS[matched] - 1 + _QIDX_OFFSET_CIRCLE
     return None
+
+
+def _find_all_question_markers(text: str) -> list[tuple[int, str]]:
+    """从文本中提取所有题号标记，返回 [(q_idx, matched_text), ...]。
+
+    与 _question_match 不同，此函数返回所有匹配（不只首个）。
+    用于处理一行 OCR 文本中包含多个题号的情况，
+    如 "2.(2分) ①(zhì pǔ) 质朴" 同时含 "2."(q_idx=101) 和 "①"(q_idx=200)。
+    """
+    results: list[tuple[int, str]] = []
+    for m in _QUESTION_PATTERN.finditer(text):
+        # (1) 或 （1）— group 1
+        if m.lastindex and m.group(1):
+            qi = int(m.group(1)) - 1 + _QIDX_OFFSET_PAREN
+            results.append((qi, m.group(0)))
+            continue
+        # 1. / 1、 — group 2 (dot) 或 group 3 (顿号)
+        if m.lastindex and m.group(2):
+            qi = int(m.group(2)) - 1 + _QIDX_OFFSET_DOT
+            results.append((qi, m.group(0)))
+            continue
+        if m.lastindex and m.group(3):
+            qi = int(m.group(3)) - 1 + _QIDX_OFFSET_DOT
+            results.append((qi, m.group(0)))
+            continue
+        # 带圈数字
+        matched = m.group(0)
+        if matched in _CIRCLED_DIGITS:
+            qi = _CIRCLED_DIGITS[matched] - 1 + _QIDX_OFFSET_CIRCLE
+            results.append((qi, matched))
+    return results
 
 
 def analyze_layout(
@@ -269,18 +300,34 @@ def _detect_questions_from_boxes(
         return []
 
     # ---- 从 OCR 记录中提取题号标记 ----
+    # P2-1: 一条 OCR 记录可能含多个题号（如 "2.(2分) ①(zhì pǔ) 质朴"），
+    # 用 _find_all_question_markers 提取全部，并对含圈号子题的记录抑制
+    # dot 格式父题号（"2." 仅为标题，实际题为 ①②）
     markers: list[dict] = []
     for rec in ocr_records:
         text = rec.get("rec_text", "")
-        q = _question_match(text)
-        if q is not None:
-            bbox = rec.get("rec_bbox")
-            if not bbox:
+        all_matches = _find_all_question_markers(text)
+        if not all_matches:
+            continue
+        bbox = rec.get("rec_bbox")
+        if not bbox:
+            continue
+        cy = bbox_center_y(bbox)
+        cx = bbox_center_x(bbox)
+
+        # P2-1: 若同一记录含 circle 格式题号（①②），抑制 dot 格式父题号
+        # 因为 "2.(2分) ①..." 中 "2." 仅为父标题，实际题目是 ①
+        has_circle = any(200 <= qi < 210 for qi, _ in all_matches)
+        for qi, matched_text in all_matches:
+            if has_circle and 100 <= qi < 200:
+                # dot 父题号在有 circle 子题时抑制
+                logger.debug(
+                    "第 %d 页: 抑制父题号 %s（同记录含圈号子题）",
+                    page_idx + 1, matched_text,
+                )
                 continue
-            cy = bbox_center_y(bbox)
-            cx = bbox_center_x(bbox)
             markers.append({
-                "q_idx": q,
+                "q_idx": qi,
                 "marker_bbox": bbox,
                 "marker_text": text,
                 "y_center": cy,
@@ -343,6 +390,11 @@ def _detect_questions_from_boxes(
 
     unique_markers = list(markers_dict.values())
 
+    # ---- P2-2: 推断缺失的括号题号 ----
+    # OCR 可能漏检题号前缀（如 "(8)悠然见南山" 只识别出 "悠然见南山"），
+    # 通过检测括号题号序列不连续性，从未匹配题号的 OCR 记录中推断补全
+    _infer_missing_paren_markers(unique_markers, ocr_records, page_idx)
+
     # ---- 列检测：按 x_center 间隙分列 ----
     columns = _split_into_columns(unique_markers)
 
@@ -359,6 +411,127 @@ def _detect_questions_from_boxes(
         len(columns),
     )
     return regions
+
+
+# 推断缺失题号时的 y 搜索窗口（与前一题 marker 的 y 差不超过此值）
+_INFER_MISSING_Y_WINDOW = 120
+
+
+def _infer_missing_paren_markers(
+    markers: list[dict],
+    ocr_records: list[dict] | None,
+    page_idx: int,
+) -> None:
+    """P2-2: 检测括号题号序列中的缺失项，从未匹配的 OCR 记录中推断补全。
+
+    当 OCR 漏检了题号前缀（如 "(8)悠然见南山" 只识别出 "悠然见南山"）时，
+    通过检测括号题号序列的不连续性来推断缺失的题号。
+
+    算法：
+    1. 收集已检测的括号题号 q_idx (0-99 范围)
+    2. 检测序列中的缺失项（如 [0,1,2,3,4,5,6] 缺 7）
+    3. 对每个缺失 q_idx=N：
+       a. 找 q_idx=N-1 的 marker (前一道题)
+       b. 从未匹配题号的 OCR 记录中，找 y 最接近且不同列的记录
+          （双栏布局中相邻括号题在不同列）
+       c. 创建推断 marker 并加入 markers（原地修改）
+
+    参数:
+        markers: 已检测的题号标记列表（原地修改，追加推断项）
+        ocr_records: 全部 OCR 识别记录
+        page_idx: 页码（日志用）
+    """
+    if not ocr_records or not markers:
+        return
+
+    # 收集已检测的括号题号
+    paren_qidxs = sorted(m["q_idx"] for m in markers if 0 <= m["q_idx"] < 100)
+    if not paren_qidxs:
+        return
+
+    # 检测缺失项：在 [min, max] 范围内有缺口的，以及 max+1, max+2
+    # （OCR 可能漏检了最后 1-2 道题的题号前缀）
+    existing = set(paren_qidxs)
+    min_qi, max_qi = paren_qidxs[0], paren_qidxs[-1]
+    missing = [qi for qi in range(min_qi, max_qi + 3) if qi not in existing and qi < 100]
+
+    if not missing:
+        return
+
+    # 收集已使用的 OCR 记录 bbox（避免重复使用）
+    used_bboxes = set(tuple(m["marker_bbox"]) for m in markers)
+
+    # 收集未匹配题号的 OCR 记录（排除已使用的）
+    unassigned: list[dict] = []
+    for rec in ocr_records:
+        text = rec.get("rec_text", "")
+        bbox = rec.get("rec_bbox")
+        if not bbox:
+            continue
+        if _question_match(text) is not None or _find_all_question_markers(text):
+            continue  # 有题号，跳过
+        if tuple(bbox) in used_bboxes:
+            continue  # 已被使用
+        # 只保留含中文字符的记录（答案文本）
+        has_chinese = any("\u4e00" <= ch <= "\u9fff" for ch in text)
+        if not has_chinese:
+            continue
+        unassigned.append({"bbox": bbox, "text": text})
+
+    if not unassigned:
+        return
+
+    for missing_qi in missing:
+        # 找前一道题的 marker
+        prev_marker = None
+        for m in markers:
+            if m["q_idx"] == missing_qi - 1:
+                prev_marker = m
+                break
+        if not prev_marker:
+            continue
+
+        prev_cx = prev_marker["x_center"]
+        prev_cy = prev_marker["y_center"]
+
+        # 从未匹配记录中找 y 最接近且不同列的记录
+        # 双栏布局中相邻括号题在不同列（如 (7) 左列 → (8) 右列）
+        best = None
+        best_dist = float("inf")
+        for rec in unassigned:
+            bbox = rec["bbox"]
+            cx = bbox_center_x(bbox)
+            cy = bbox_center_y(bbox)
+            # y 距离要近（同一行或相邻行）
+            dy = abs(cy - prev_cy)
+            if dy > _INFER_MISSING_Y_WINDOW:
+                continue
+            # 不同列（双栏布局中相邻题号在不同列）
+            # 用 x 差值判断：差值 > 150px 视为不同列
+            if abs(cx - prev_cx) < _COLUMN_GAP_THRESHOLD:
+                continue  # 同列，跳过
+            if dy < best_dist:
+                best_dist = dy
+                best = rec
+
+        if best:
+            bbox = best["bbox"]
+            cy = bbox_center_y(bbox)
+            cx = bbox_center_x(bbox)
+            inferred_num = missing_qi + 1
+            markers.append({
+                "q_idx": missing_qi,
+                "marker_bbox": bbox,
+                "marker_text": f"({inferred_num})",  # 推断的题号
+                "y_center": cy,
+                "x_center": cx,
+                "inferred": True,
+            })
+            used_bboxes.add(tuple(bbox))
+            logger.info(
+                "第 %d 页: 推断缺失题号 (%d) 从 OCR 记录 '%s' (cy=%.0f, cx=%.0f)",
+                page_idx + 1, inferred_num, best["text"], cy, cx,
+            )
 
 
 def _split_into_columns(markers: list[dict]) -> list[list[dict]]:
@@ -541,16 +714,18 @@ def _assign_to_handwriting(
         # ---- 策略2：跨列 y 距离极近纠正 ----
         # 当列内匹配成功，但手写框在 y 方向上极靠近不同列的题号 marker 时，
         # 优先使用该 marker 的题号（处理双栏中学生答案跨列书写的情况）
+        # P2-3: 仅当当前匹配 marker 的 y 距离较大（> _Y_FAR_THRESHOLD）时才纠正，
+        # 避免在当前匹配已经很准时误切换到 y 稍近的其他列 marker
         if matched is not None and len(col_candidates) > 1:
-            _Y_PROXIMITY_THRESHOLD = 30  # 200 DPI 下 ~4pt
-            for qi, my in marker_y_map.items():
-                if qi == matched:
-                    continue
-                dy = abs(cy - my)
-                if dy < _Y_PROXIMITY_THRESHOLD:
-                    # 找到 y 方向更近的题号 → 优先使用
-                    current_dy = abs(cy - marker_y_map.get(matched, cy))
-                    if dy < current_dy:
+            _Y_PROXIMITY_THRESHOLD = 30  # 候选 marker 的 y 距离阈值（200 DPI 下 ~4pt）
+            _Y_FAR_THRESHOLD = 60  # 当前匹配 marker y 距离超过此值才考虑纠正
+            current_dy = abs(cy - marker_y_map.get(matched, cy))
+            if current_dy > _Y_FAR_THRESHOLD:
+                for qi, my in marker_y_map.items():
+                    if qi == matched:
+                        continue
+                    dy = abs(cy - my)
+                    if dy < _Y_PROXIMITY_THRESHOLD and dy < current_dy:
                         logger.debug(
                             "跨列纠正: cy=%.1f 从 q_idx=%d(dy=%.1f) 改为 q_idx=%d(dy=%.1f)",
                             cy, matched, current_dy, qi, dy,

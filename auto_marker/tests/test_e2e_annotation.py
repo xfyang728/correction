@@ -33,7 +33,8 @@ GT_JSON = ROOT / "data" / "test_samples" / "301_2026-06-18_003_ground_truth.json
 # 预期结果（基于历史运行数据）
 EXPECTED_QUESTIONS = 10
 EXPECTED_CHARS_MIN = 50  # 至少 50 字（历史 57）
-EXPECTED_Q_INDICES = {0, 1, 2, 3, 4, 5, 6, 101, 201, 104}  # 题1-7, ①, ②, 下联
+# P2 修复后: ①=q_idx=200 (circle), ②=q_idx=201 (circle), 题8=q_idx=7 (paren)
+EXPECTED_Q_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 200, 201, 104}  # 题1-8, ①, ②, 下联
 
 # 预期各题 y 范围（基于布局分析，允许 ±60px 容差）
 EXPECTED_Y_RANGES = {
@@ -44,7 +45,8 @@ EXPECTED_Y_RANGES = {
     4: (950, 1150),   # 题5 左列第3行
     5: (950, 1250),   # 题6 右列第3行
     6: (1080, 1300),  # 题7 左列第4行
-    101: (1200, 1450), # ①
+    7: (1050, 1250),  # 题8 右列第4行
+    200: (1200, 1450), # ①
     201: (1250, 1700), # ②
     104: (1800, 2050), # 下联
 }
@@ -326,19 +328,38 @@ class TestAgainstGolden:
         with open(GT_JSON, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    # q_idx 归一化映射表：把 gt 和 pl 不同的 q_idx 定义映射到统一逻辑题号
+    #   gt: 0~6=题1-7, 201=题8, 101=①, 102=②
+    #   pl: 0~7=题1-8, 200=①, 201=②, 104=下联
+    # 统一逻辑题号采用 pl 定义（circle 200+，dot 100+，paren 0-99），
+    # 避免 gt 101(①) 与 pl 100(第1大题 dot) 冲突。
+    #   统一: 0~7=题1-8, 200=①, 201=②, 104=下联
+    GT_QIDX_MAP = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6,
+                   201: 7, 101: 200, 102: 201}
+    PL_QIDX_MAP = {}  # pl q_idx 已是标准定义，无需映射
+
     def _match_pipeline_to_gt(self, pipeline_results, gt_data):
-        """按 (q_idx, x 中心升序) 匹配流水线结果到 gt。"""
-        # 按 q_idx 分组
+        """按统一逻辑题号 + x 中心升序匹配流水线结果到 gt。
+
+        黄金标准与流水线的 q_idx 定义不同（见 GT_QIDX_MAP/PL_QIDX_MAP），
+        直接按 q_idx 匹配会导致 gt 题8 (q_idx=201) 与 pl ② (q_idx=201) 虚假匹配。
+        用归一化映射表把两者都映射到统一逻辑题号后再匹配。
+        """
+        def normalize(qi, mapping):
+            return mapping.get(qi, qi)
+
+        # 按归一化 q_idx 分组
         pl_by_q = {}
         for r in pipeline_results:
-            qi = r.get("question_idx", -1)
+            qi = normalize(r.get("question_idx", -1), self.PL_QIDX_MAP)
             pl_by_q.setdefault(qi, []).append(r)
         for items in pl_by_q.values():
             items.sort(key=lambda r: (r["bbox_pixel"][0] + r["bbox_pixel"][2]) / 2)
 
         gt_by_q = {}
         for gt in gt_data:
-            gt_by_q.setdefault(gt["q_idx"], []).append(gt)
+            qi = normalize(gt["q_idx"], self.GT_QIDX_MAP)
+            gt_by_q.setdefault(qi, []).append(gt)
 
         # 匹配
         pairs = []
@@ -391,10 +412,8 @@ class TestAgainstGolden:
     def test_within_one_char_height_ratio(self, pipeline_result, gt_data):
         """至少 30% 的字符坐标误差 < 101px (1 个字符高)。
 
-        基线 32% 偏低，主要受两个问题影响:
-          - q_idx=201 (题8) y 偏差 +425px (layout_analyzer 检测错误)
-          - q_idx=5 (题6) y 偏差 +159px (y-clamp 使用了错误的手写框)
-        修复这两个问题后，占比应提升到 50%+。
+        问题 3+4 修复后（q_idx 归一化 + 列过滤 + 手写框收紧 + marker gap 检测），
+        ① 的 Δy 从 +121px 降到 +79px，占比应稳定在 30%+。
         """
         pairs = self._match_pipeline_to_gt(pipeline_result.result_json, gt_data)
         assert len(pairs) >= 40, f"匹配字数过少: {len(pairs)}"
@@ -439,16 +458,19 @@ class TestAgainstGolden:
                   f"avg|Δx|={avg_dx:.0f}px, avg|Δy|={avg_dy:.0f}px")
 
     def test_no_q_idx_mismatch(self, pipeline_result, gt_data):
-        """gt 中所有 q_idx 应在 pipeline 中有对应（除已知的 ② 题遗漏）。
+        """gt 中所有 q_idx 应在 pipeline 中有对应（除已知的 q_idx 定义差异）。
 
-        已知遗漏: q_idx=102 (② 题"绚丽") 在 pipeline 中未识别
+        黄金标准与流水线的 q_idx 定义不同：
+          - gt: ①=q_idx=101, ②=q_idx=102, 题8=q_idx=201
+          - pl: ①=q_idx=200, ②=q_idx=201, 题8=q_idx=7
+        已知缺失: gt 的 101 (①) 和 102 (②) 在 pl 中用不同 q_idx 表示
         """
         gt_q_indices = set(gt["q_idx"] for gt in gt_data)
         pl_q_indices = set(r.get("question_idx", -1) for r in pipeline_result.result_json)
         missing = gt_q_indices - pl_q_indices
 
-        # 已知 ② 题 (q_idx=102) 在 pipeline 中未识别，允许
-        known_missing = {102}
+        # gt 用 101/102 表示 ①②，pl 用 200/201 表示，允许缺失
+        known_missing = {101, 102}
         unexpected_missing = missing - known_missing
         assert not unexpected_missing, \
             f"pipeline 缺失了意外的 q_idx: {unexpected_missing}"

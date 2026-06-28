@@ -429,16 +429,21 @@ def _match_q_idx_by_bbox(
     region_by_qidx: dict[int, dict],
     img_w: int,
     expected_format: str | None = None,
+    used_regions: set[int] | None = None,
 ) -> int | None:
     """用首字像素 bbox 中心 y 匹配 region 的 [y_start,y_end]，x 中心与 marker 列同侧过滤。
 
     expected_format: 若提供 ('paren'/'dot'/'circle')，只匹配同格式范围的 region，
                      防止 ① 的坐标误匹配到 (3) 等跨格式 region（P0-3）。
+    used_regions: 若提供，跳过已占用的 region，防止多题匹配到同一 region（P2-4）。
     """
     cx = (char_bbox_pixel[0] + char_bbox_pixel[2]) / 2
     cy = (char_bbox_pixel[1] + char_bbox_pixel[3]) / 2
     page_mid = img_w / 2
     for q_idx, region in region_by_qidx.items():
+        # P2-4: 跳过已占用的 region
+        if used_regions is not None and q_idx in used_regions:
+            continue
         # P0-3: 格式过滤，防止带圈数字误匹配括号题号 region
         if expected_format and _q_idx_format_range(q_idx) != expected_format:
             continue
@@ -543,30 +548,136 @@ def _estimate_question_x_range(
     return x_start, x_end
 
 
+# 手写框 y 跨度阈值：超过此值视为跨多行的大手写框，匹配时过滤掉
+_HW_Y_MAX_SPAN = 180
+# 手写框 y 收紧边距（上下各裁此像素数，去除空白边距）
+# 仅对高度 > _HW_Y_TIGHTEN_MIN_H 的手写框生效
+_HW_Y_TIGHTEN_MARGIN = 8
+_HW_Y_TIGHTEN_MIN_H = 150
+# P4: 手写框 y0 与 marker_bbox y0 的 gap 阈值
+# 手写框检测有时只取了 marker（题号+手写答案合并框）的下半部分，
+# 导致 y_start 偏低。当 gap > 此值时，改用 marker_bbox y 范围。
+_HW_Y_MARKER_GAP_THRESHOLD = 50
+
+
+def _tighten_hw_y_range(y0: int, y1: int) -> tuple[int, int]:
+    """P3-3: 收紧手写框 y 范围，去除上下空白边距。
+
+    手写框（尤其是 sub_region 条带）的 y 范围常含上下空白边距，
+    导致 y-clamp 后文字偏移。按固定像素收紧（上下各裁 8px）。
+    仅对高度 > 150px 的手写框收紧，避免对小框过度裁剪。
+    """
+    h = y1 - y0
+    if h <= _HW_Y_TIGHTEN_MIN_H:
+        return y0, y1
+    return y0 + _HW_Y_TIGHTEN_MARGIN, y1 - _HW_Y_TIGHTEN_MARGIN
+
+
 def _estimate_question_y_range(
     region: dict,
     handwriting_boxes: list[dict] | None,
     img_h: int,
     img_w: int = 0,
 ) -> tuple:
-    """从 handwriting_boxes 中找出同列且 y 最接近的手写框，返回精确 (y_start, y_end)。
+    """从 handwriting_boxes 中找出该题的手写框，返回精确 (y_start, y_end)。
 
     模型 y 坐标系统性偏移，用 layout_analyzer 检测的手写框 y 范围替代。
-    通过 marker x 位置判断左右列，再用 y 中心距离找最近的手写框。
+
+    P3 修复 Y 中等偏移：
+    1. 优先用 question_idx 匹配手写框（避免 region y 过大时选错）
+    2. 在匹配的手写框中过滤 y 跨度过大的（跨多行大手写框），选 y 中心
+       最接近 marker y_center 的
+    3. 收紧手写框 y 范围（去除上下空白边距）
+    4. 无 question_idx 匹配时回退到同列 + y 中心最近逻辑
     """
     y_start = region["y_start"]
     y_end = region["y_end"]
     region_h = y_end - y_start
+    q_idx = region.get("q_idx")
 
     if not handwriting_boxes or not img_w:
         return y_start, y_end
 
     marker_bbox = region.get("marker_bbox")
     marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
+    marker_cy = (
+        (marker_bbox[1] + marker_bbox[3]) / 2 if marker_bbox else (y_start + y_end) / 2
+    )
     page_mid = img_w / 2
     region_y_center = (y_start + y_end) / 2
 
-    # 找同列（左/右半页）且 y 中心最接近 region 的手写框
+    # ---- P3-1: 优先用 question_idx 匹配手写框 ----
+    # region y 范围可能过大（如 ② 的 y=[1266,1889] 含 4.题答案区），
+    # 用 question_idx 精确匹配避免选错手写框
+    matched_boxes = [
+        hb for hb in handwriting_boxes
+        if q_idx is not None
+        and hb.get("question_idx") == q_idx
+        and hb.get("bbox_pixel")
+    ] if q_idx is not None else []
+
+    if matched_boxes:
+        # P3-2: 过滤 y 跨度过大的手写框（跨多行的大手写框，如 4.题答案区 h=209）
+        compact_boxes = [
+            hb for hb in matched_boxes
+            if (hb["bbox_pixel"][3] - hb["bbox_pixel"][1]) <= _HW_Y_MAX_SPAN
+        ]
+        candidates = compact_boxes if compact_boxes else matched_boxes
+
+        # P3-4: 列过滤 — 优先选与 marker 同列的手写框
+        # 避免双栏布局中选到另一列的手写框（如题1 选了右列手写框）
+        same_col_candidates = [
+            hb for hb in candidates
+            if (marker_cx < page_mid) == (
+                (hb["bbox_pixel"][0] + hb["bbox_pixel"][2]) / 2 < page_mid
+            )
+        ]
+        search_pool = same_col_candidates if same_col_candidates else candidates
+
+        # 选 y 中心最接近 marker y_center 的手写框（marker y 比 region y_center 更准）
+        best_box = min(
+            search_pool,
+            key=lambda hb: abs(
+                (hb["bbox_pixel"][1] + hb["bbox_pixel"][3]) / 2 - marker_cy
+            ),
+        )
+        best_bbox = best_box["bbox_pixel"]
+        actual_y_start = best_bbox[1]
+        actual_y_end = best_bbox[3]
+
+        # P4: 手写框 y0 与 marker_bbox y0 的 gap 检测
+        # 手写框检测有时只取了 marker（题号+手写答案合并框）的下半部分，
+        # 导致 y_start 偏低（gt 字符实际在 marker 上半部分）。
+        # 条件: gap > 阈值 且 marker_bbox y 跨度 > 150（确认是大合并框，非纯题号框）。
+        # 当条件满足时，改用 marker_bbox y 范围（y 中心 = marker_cy 更准）。
+        if marker_bbox:
+            m_y0 = marker_bbox[1]
+            m_y1 = marker_bbox[3]
+            m_h = m_y1 - m_y0
+            gap = actual_y_start - m_y0
+            if gap > _HW_Y_MARKER_GAP_THRESHOLD and m_h > _HW_Y_TIGHTEN_MIN_H:
+                logger.debug(
+                    "P4: q_idx=%d 手写框 y0=%d 比 marker y0=%d 低 %dpx > %d，"
+                    "marker h=%d > %d，改用 marker_bbox y=[%d,%d]",
+                    q_idx, actual_y_start, m_y0, gap,
+                    _HW_Y_MARKER_GAP_THRESHOLD, m_h, _HW_Y_TIGHTEN_MIN_H,
+                    m_y0, m_y1,
+                )
+                return m_y0, m_y1
+
+        # P3-3: 收紧手写框 y 范围（去除空白边距）
+        actual_y_start, actual_y_end = _tighten_hw_y_range(actual_y_start, actual_y_end)
+        actual_h = actual_y_end - actual_y_start
+        if actual_h < region_h:
+            logger.debug(
+                "region y=[%d,%d] (%dpx) → 手写框 y=[%d,%d] (%dpx) [q_idx=%d matched, %d 个候选]",
+                y_start, y_end, region_h,
+                actual_y_start, actual_y_end, actual_h, q_idx, len(search_pool),
+            )
+            return actual_y_start, actual_y_end
+        return y_start, y_end
+
+    # ---- 回退：同列且 y 中心最接近 region_y_center 的手写框 ----
     best_box = None
     best_dist = float("inf")
     for hw_box in handwriting_boxes:
@@ -587,17 +698,117 @@ def _estimate_question_y_range(
     if best_box:
         actual_y_start = best_box[1]
         actual_y_end = best_box[3]
+
+        # P4: gap 检测（同 P3-1 路径）
+        if marker_bbox:
+            m_y0 = marker_bbox[1]
+            m_y1 = marker_bbox[3]
+            m_h = m_y1 - m_y0
+            gap = actual_y_start - m_y0
+            if gap > _HW_Y_MARKER_GAP_THRESHOLD and m_h > _HW_Y_TIGHTEN_MIN_H:
+                logger.debug(
+                    "P4[fallback]: q_idx=%s 手写框 y0=%d 比 marker y0=%d 低 %dpx > %d，"
+                    "marker h=%d > %d，改用 marker_bbox y=[%d,%d]",
+                    q_idx, actual_y_start, m_y0, gap,
+                    _HW_Y_MARKER_GAP_THRESHOLD, m_h, _HW_Y_TIGHTEN_MIN_H,
+                    m_y0, m_y1,
+                )
+                return m_y0, m_y1
+
+        # P3-3: 收紧手写框 y 范围
+        actual_y_start, actual_y_end = _tighten_hw_y_range(actual_y_start, actual_y_end)
         actual_h = actual_y_end - actual_y_start
         # 只在手写框比 region 更紧凑时使用
         if actual_h < region_h:
             logger.debug(
-                "region y=[%d,%d] (%dpx) → 手写框 y=[%d,%d] (%dpx), dist=%.0f",
+                "region y=[%d,%d] (%dpx) → 手写框 y=[%d,%d] (%dpx), dist=%.0f [fallback]",
                 y_start, y_end, region_h,
                 actual_y_start, actual_y_end, actual_h, best_dist,
             )
             return actual_y_start, actual_y_end
 
     return y_start, y_end
+
+
+def _rescale_chars_x_to_region(
+    char_items: list[dict],
+    region: dict,
+    img_w: int,
+    handwriting_boxes: list[dict] | None = None,
+    scale_threshold: float = 1.3,
+) -> list[dict]:
+    """P1-1: 当模型 x 跨度明显偏大时，按手写框 x 范围线性映射模型 x。
+
+    模型可能把双栏当单栏输出 x 坐标，导致 x 跨度比实际大 1.3-2 倍
+    （如题1 "随君直到夜郎西" 模型跨度 744px，手写框跨度 449px）。
+    检测：若某行模型 x 跨度 > 手写框 x 跨度 * scale_threshold，则线性映射。
+    跨行题（模型 y 分多行）按行分别映射，保持每行内相对顺序。
+
+    参数:
+        char_items: 模型输出的逐字列表，每项含 bbox_norm (x0,y0,x1,y1)
+        region: 题目区域，含 marker_bbox, y_start, y_end
+        img_w: 图像宽度（像素）
+        handwriting_boxes: layout_analyzer 输出的手写区域列表
+        scale_threshold: 触发映射的跨度比阈值（默认 1.3）
+
+    返回:
+        新的 char_items 列表（x 可能被重映射，y 保留模型值）
+    """
+    if not char_items:
+        return char_items
+
+    # 获取手写框 x 范围（基于 marker 列 + y 区间过滤）
+    hw_x0, hw_x2 = _estimate_question_x_range(region, handwriting_boxes, img_w)
+    if hw_x0 >= hw_x2:
+        return char_items
+
+    hw_span_px = hw_x2 - hw_x0
+
+    # 按模型 y 分行（检测跨行：y0 差值 > 0.05 归一化视为换行）
+    rows: list[list[int]] = []
+    current_row: list[int] = []
+    prev_y0: float | None = None
+    for i, ci in enumerate(char_items):
+        y0 = ci["bbox_norm"][1]
+        if prev_y0 is not None and abs(y0 - prev_y0) > 0.05:
+            rows.append(current_row)
+            current_row = []
+        current_row.append(i)
+        prev_y0 = y0
+    if current_row:
+        rows.append(current_row)
+
+    # 对每行检测并映射
+    rescaled = list(char_items)  # 浅拷贝
+    any_rescaled = False
+    for row_indices in rows:
+        row_items = [char_items[i] for i in row_indices]
+        model_x0_norm = min(ci["bbox_norm"][0] for ci in row_items)
+        model_x2_norm = max(ci["bbox_norm"][2] for ci in row_items)
+        model_span_px = (model_x2_norm - model_x0_norm) * img_w
+
+        if model_span_px <= hw_span_px * scale_threshold:
+            continue  # 模型 x 跨度合理，保留
+
+        # 线性映射到手写框 x 范围
+        any_rescaled = True
+        model_span_norm = model_x2_norm - model_x0_norm
+        hw_x0_norm = hw_x0 / img_w
+        hw_x2_norm = hw_x2 / img_w
+        hw_span_norm = hw_x2_norm - hw_x0_norm
+        for idx in row_indices:
+            ci = char_items[idx]
+            x0, y0, x1, y1 = ci["bbox_norm"]
+            new_x0 = hw_x0_norm + (x0 - model_x0_norm) / model_span_norm * hw_span_norm
+            new_x1 = hw_x0_norm + (x1 - model_x0_norm) / model_span_norm * hw_span_norm
+            rescaled[idx] = {**ci, "bbox_norm": (new_x0, y0, new_x1, y1)}
+
+    if any_rescaled:
+        logger.debug(
+            "模型 x 跨度偏大，已按手写框 x 范围线性映射 (%d 字, hw_x=[%d,%d])",
+            len(char_items), hw_x0, hw_x2,
+        )
+    return rescaled
 
 
 def _clamp_chars_y_to_region(
@@ -1024,10 +1235,11 @@ def recognize_page_level(
                         has_q_format = True
 
                     if has_q_format:
-                        # 先尝试格式精确匹配
+                        # 先尝试格式精确匹配（P2-4: 跳过已占用 region）
                         target_q_idx = _match_q_idx_by_bbox(
                             first_pixel, region_by_qidx, img_w,
-                            expected_format=expected_fmt)
+                            expected_format=expected_fmt,
+                            used_regions=used_regions)
                         # 格式匹配失败 → 退化为无格式匹配（跳过已占用 region）
                         if target_q_idx is None:
                             for candidate_qi, candidate_region in region_by_qidx.items():
@@ -1088,9 +1300,12 @@ def recognize_page_level(
                     # P3: 文字渲染模式 — 保留模型 x 坐标，但仍然 clamp y（模型 y 系统性偏移）
                     from core.recognition_config import RENDER_TEXT_MODE
                     if RENDER_TEXT_MODE:
-                        # 文字渲染模式：只 clamp y，保留模型原始 x 坐标
+                        # 文字渲染模式：先修正 x 跨度偏大，再 clamp y
+                        # P1-1: 模型 x 跨度可能比实际大 1.3-2 倍，按手写框 x 范围线性映射
+                        rescaled_items = _rescale_chars_x_to_region(
+                            char_items, region, img_w, handwriting_boxes)
                         clamped_items = _clamp_chars_y_to_region(
-                            char_items, region, img_h, handwriting_boxes, img_w)
+                            rescaled_items, region, img_h, handwriting_boxes, img_w)
                     else:
                         clamped_items = _clamp_chars_to_column(char_items, region, img_w, handwriting_boxes)
                         clamped_items = _clamp_chars_y_to_region(
@@ -1120,7 +1335,7 @@ def recognize_page_level(
                     x_start, x_end = _estimate_question_x_range(
                         region, handwriting_boxes, img_w)
                     actual_y_start, actual_y_end = _estimate_question_y_range(
-                        region, handwriting_boxes, img_h)
+                        region, handwriting_boxes, img_h, img_w)
                     split = _equal_width_split(
                         std_chars, x_start, x_end,
                         actual_y_start, actual_y_end,
@@ -1228,7 +1443,7 @@ def _fallback_text_path(
         used_regions.add(target_q_idx)
         q_idx = region["q_idx"]
         actual_y_start, actual_y_end = _estimate_question_y_range(
-            region, handwriting_boxes, img_h)
+            region, handwriting_boxes, img_h, img_w)
 
         x_start, x_end = _estimate_question_x_range(region, handwriting_boxes, img_w)
         split_results = _equal_width_split(
