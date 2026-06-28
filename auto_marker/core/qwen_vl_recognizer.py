@@ -547,38 +547,55 @@ def _estimate_question_y_range(
     region: dict,
     handwriting_boxes: list[dict] | None,
     img_h: int,
+    img_w: int = 0,
 ) -> tuple:
-    """从 handwriting_boxes 中找出同列同 y 区间的手写框，返回实际 (y_start, y_end)。
+    """从 handwriting_boxes 中找出同列且 y 最接近的手写框，返回精确 (y_start, y_end)。
 
-    当 region 过大（如整个下半页）时，用 handwriting_boxes 的实际书写 y 范围替代，
-    防止字符 bbox 被拉到 region 底部（P2-6 下联问题）。
+    模型 y 坐标系统性偏移，用 layout_analyzer 检测的手写框 y 范围替代。
+    通过 marker x 位置判断左右列，再用 y 中心距离找最近的手写框。
     """
     y_start = region["y_start"]
     y_end = region["y_end"]
     region_h = y_end - y_start
 
-    # region 过大（>400px）且 handwriting_boxes 可用时，用实际书写 y 范围
-    if region_h > 400 and handwriting_boxes:
-        marker_bbox = region.get("marker_bbox")
-        marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_h / 2
-        hw_ys = []
-        for hw_box in handwriting_boxes:
-            hw_bbox = hw_box.get("bbox_pixel")
-            if not hw_bbox:
-                continue
-            hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
-            hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
-            page_mid = img_h  # 用 img_h 避免与 x 列判断冲突
-            if (marker_cx < page_mid) == (hw_cx < page_mid):
-                hw_ys.append((hw_bbox[1], hw_bbox[3]))
-        if hw_ys:
-            actual_y_start = min(y for y, _ in hw_ys)
-            actual_y_end = max(y for _, y in hw_ys)
-            # 只在实际范围比 region 范围更紧凑时使用
-            if actual_y_end - actual_y_start < region_h * 0.7:
-                logger.debug("region 过大 (%dpx)，用 handwriting_boxes y 范围替代 (%dpx)",
-                             region_h, actual_y_end - actual_y_start)
-                return actual_y_start, actual_y_end
+    if not handwriting_boxes or not img_w:
+        return y_start, y_end
+
+    marker_bbox = region.get("marker_bbox")
+    marker_cx = (marker_bbox[0] + marker_bbox[2]) / 2 if marker_bbox else img_w / 2
+    page_mid = img_w / 2
+    region_y_center = (y_start + y_end) / 2
+
+    # 找同列（左/右半页）且 y 中心最接近 region 的手写框
+    best_box = None
+    best_dist = float("inf")
+    for hw_box in handwriting_boxes:
+        hw_bbox = hw_box.get("bbox_pixel")
+        if not hw_bbox:
+            continue
+        hw_cx = (hw_bbox[0] + hw_bbox[2]) / 2
+        hw_y_center = (hw_bbox[1] + hw_bbox[3]) / 2
+        # 列过滤：marker 和 hw_box 必须在同一半页
+        if (marker_cx < page_mid) != (hw_cx < page_mid):
+            continue
+        # y 中心距离
+        dist = abs(hw_y_center - region_y_center)
+        if dist < best_dist:
+            best_dist = dist
+            best_box = hw_bbox
+
+    if best_box:
+        actual_y_start = best_box[1]
+        actual_y_end = best_box[3]
+        actual_h = actual_y_end - actual_y_start
+        # 只在手写框比 region 更紧凑时使用
+        if actual_h < region_h:
+            logger.debug(
+                "region y=[%d,%d] (%dpx) → 手写框 y=[%d,%d] (%dpx), dist=%.0f",
+                y_start, y_end, region_h,
+                actual_y_start, actual_y_end, actual_h, best_dist,
+            )
+            return actual_y_start, actual_y_end
 
     return y_start, y_end
 
@@ -588,25 +605,26 @@ def _clamp_chars_y_to_region(
     region: dict,
     img_h: int,
     handwriting_boxes: list[dict] | None = None,
+    img_w: int = 0,
 ) -> list[dict]:
-    """将 chars 的 y 坐标约束到 region 的 y 范围内。
+    """将 chars 的 y 坐标替换为 region/手写框的 y 范围。
 
-    模型 bbox 的 y 可能系统性偏高/偏低，用 region y_start/y_end 约束，
-    同时保留模型的 x 坐标（x 通常更准）。
+    模型 bbox 的 y 系统性偏移（多题共享同一 y），直接用 layout_analyzer
+    检测的精确 y 范围替代，保留模型的 x 坐标。
     """
-    y_start, y_end = _estimate_question_y_range(region, handwriting_boxes, img_h)
+    y_start, y_end = _estimate_question_y_range(region, handwriting_boxes, img_h, img_w)
     if y_start >= y_end:
         return char_items
+
+    # 归一化 y 范围
+    norm_y0 = y_start / img_h
+    norm_y1 = y_end / img_h
 
     clamped = []
     for ci in char_items:
         x0, y0, x1, y1 = ci["bbox_norm"]
-        # 将 y 约束到 region 范围内
-        new_y0 = max(y_start / img_h, min(y0, y_end / img_h))
-        new_y1 = max(y_start / img_h, min(y1, y_end / img_h))
-        if new_y1 <= new_y0:
-            new_y1 = new_y0 + 0.01
-        clamped.append({**ci, "bbox_norm": (x0, new_y0, x1, new_y1)})
+        # 直接用 region/手写框的 y 范围替换模型 y（模型 y 不可靠）
+        clamped.append({**ci, "bbox_norm": (x0, norm_y0, x1, norm_y1)})
     return clamped
 
 
@@ -857,8 +875,9 @@ def _split_merged_json_chars(
         region = region_by_qidx.get(current_q_idx)
         if region:
             used_regions.add(current_q_idx)
-            # P2-6: clamp 到列范围
+            # P2-6: clamp 到列范围 + y 范围
             chunk = _clamp_chars_to_column(chunk, region, img_w, handwriting_boxes=None)
+            chunk = _clamp_chars_y_to_region(chunk, region, img_h, handwriting_boxes, img_w)
 
         conf = _estimate_confidence(chunk, std_chars, is_invalid=False)
         for ci in chunk:
@@ -952,6 +971,37 @@ def recognize_page_level(
             # 题号 → q_idx（复用 layout_analyzer 逻辑）
             target_q_idx = _question_marker_to_q_idx(q_marker) if q_marker else None
 
+            # P0-4: circle q_idx (200+) 在 region_by_qidx 中不存在时，
+            # 通过标记文本中的圈号字符回退匹配（如 ① 匹配 "2.(2分) ①..." → q_idx=101）
+            if target_q_idx is not None and target_q_idx not in region_by_qidx:
+                circle_chars = [c for c in q_marker if c in "①②③④⑤⑥⑦⑧⑨⑩"]
+                if circle_chars:
+                    for candidate_qi, candidate_region in region_by_qidx.items():
+                        if candidate_qi in used_regions:
+                            continue
+                        marker_text = candidate_region.get("marker_text", "")
+                        if any(c in marker_text for c in circle_chars):
+                            target_q_idx = candidate_qi
+                            logger.debug("圈号回退匹配: '%s' → q_idx=%d (marker='%s')",
+                                         q_marker, candidate_qi, marker_text)
+                            break
+
+            # P0-5: 无题号格式的 q_marker（如"下联"）通过标记文本内容回退匹配
+            if target_q_idx is None and q_marker:
+                # 提取 q_marker 中的中文关键词（去掉标点、数字）
+                import re as _re2
+                kw = _re2.sub(r"[①②③④⑤⑥⑦⑧⑨⑩（()）\d\s.、]", "", q_marker).strip()
+                if kw and len(kw) >= 2:
+                    for candidate_qi, candidate_region in region_by_qidx.items():
+                        if candidate_qi in used_regions:
+                            continue
+                        marker_text = candidate_region.get("marker_text", "")
+                        if kw in marker_text:
+                            target_q_idx = candidate_qi
+                            logger.debug("文本回退匹配: '%s' → q_idx=%d (marker='%s')",
+                                         q_marker, candidate_qi, marker_text)
+                            break
+
             # P0-3: q_idx 匹配失败时，用首字像素坐标兜底定位（格式感知）
             # 注意：bbox 兜底只对有题号格式但未匹配的题生效；
             # 无题号格式的 q_marker（如"下联："）若 region 已被占用则跳过，避免覆盖
@@ -1033,13 +1083,16 @@ def recognize_page_level(
                     logger.info("题号 '%s' q_idx=%d: 检测到合并题，已拆分 (%d 字 → %d 字)",
                                 q_marker, q_idx, len(char_items), len(split_results))
                 else:
-                    # P3: 文字渲染模式 — 跳过坐标 clamp，直接使用模型原始坐标
+                    # P3: 文字渲染模式 — 保留模型 x 坐标，但仍然 clamp y（模型 y 系统性偏移）
                     from core.recognition_config import RENDER_TEXT_MODE
                     if RENDER_TEXT_MODE:
-                        clamped_items = char_items
+                        # 文字渲染模式：只 clamp y，保留模型原始 x 坐标
+                        clamped_items = _clamp_chars_y_to_region(
+                            char_items, region, img_h, handwriting_boxes, img_w)
                     else:
                         clamped_items = _clamp_chars_to_column(char_items, region, img_w, handwriting_boxes)
-                        clamped_items = _clamp_chars_y_to_region(clamped_items, region, img_h, handwriting_boxes)
+                        clamped_items = _clamp_chars_y_to_region(
+                            clamped_items, region, img_h, handwriting_boxes, img_w)
                     # P1-4: 估算置信度
                     conf = _estimate_confidence(char_items, std_chars, is_invalid=False)
                     for ci in clamped_items:
