@@ -845,6 +845,7 @@ def _split_merged_json_chars(
     img_w: int,
     img_h: int,
     used_regions: set[int],
+    handwriting_boxes: list[dict] | None = None,
 ) -> list[dict]:
     """P0-2: 将合并的 JSON chars 按标准答案字数拆分为多题。
 
@@ -1077,6 +1078,7 @@ def recognize_page_level(
                     split_results = _split_merged_json_chars(
                         char_items, q_idx, std_answers_by_qidx,
                         region_by_qidx, page_idx, img_w, img_h, used_regions,
+                        handwriting_boxes,
                     )
                     all_results.extend(split_results)
                     json_success_count += 1
