@@ -2,16 +2,18 @@
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 import numpy as np
 
-sys.path.insert(0, str(Path('.').resolve()))
 import fitz
 from PIL import Image
 
 from core.text_detector import detect_text
 
-pdf_path = '301_2026-06-18_003.pdf'
-doc = fitz.open(pdf_path)
+pdf_path = ROOT / "data" / "test_samples" / "301_2026-06-18_003.pdf"
+doc = fitz.open(str(pdf_path))
 page = doc.load_page(0)
 pix = page.get_pixmap(matrix=fitz.Matrix(200/72, 200/72), colorspace=fitz.csRGB)
 img = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)

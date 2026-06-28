@@ -6,7 +6,8 @@ import fitz
 import numpy as np
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
 from services.pipeline_service import OCR_DPI, _file_hash, _load_ocr_cache
@@ -14,7 +15,7 @@ from core.image_processor import preprocess_image
 from core.layout_analyzer import analyze_layout
 from core.qwen_vl_recognizer import recognize_with_qwen_vl, _call_qwen_vl
 
-PDF = "301_2026-06-18_003.pdf"
+PDF = str(ROOT / "data" / "test_samples" / "301_2026-06-18_003.pdf")
 
 # 渲染 + 预处理
 doc = fitz.open(PDF)

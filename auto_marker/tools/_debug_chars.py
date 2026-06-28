@@ -5,16 +5,20 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 import fitz
 import numpy as np
 from PIL import Image
 
 # 渲染 PDF 第一页
-pdf_path = Path(__file__).resolve().parent / "data" / "incoming" / "301_2025-03-20_001.pdf"
+pdf_path = ROOT / "data" / "incoming" / "301_2025-03-20_001.pdf"
 if not pdf_path.exists():
-    pdf_path = Path(__file__).resolve().parent / "301_2025-03-20_001.pdf"
+    pdf_path = ROOT / "data" / "test_samples" / "301_2025-03-20_001.pdf"
 doc = fitz.open(str(pdf_path))
 page = doc.load_page(0)
 pix = page.get_pixmap(matrix=fitz.Matrix(200/72, 200/72), colorspace=fitz.csRGB)

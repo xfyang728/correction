@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # 确保项目根在 sys.path
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 logging.basicConfig(
@@ -280,7 +280,7 @@ def main():
     pdf_name = sys.argv[1] if len(sys.argv) > 1 else "301_2026-06-18_003.pdf"
 
     # 检查文件是否存在
-    pdf_path = ROOT / pdf_name
+    pdf_path = ROOT / "data" / "test_samples" / pdf_name
     if not pdf_path.exists():
         # 尝试从 data/incoming/ 查找
         incoming = ROOT / "data" / "incoming" / pdf_name
@@ -288,7 +288,7 @@ def main():
             pdf_path = incoming
         else:
             print(f" 文件不存在: {pdf_name}")
-            print(f"    searched: {ROOT / pdf_name}")
+            print(f"    searched: {ROOT / 'data' / 'test_samples' / pdf_name}")
             print(f"   searched: {incoming}")
             sys.exit(1)
 

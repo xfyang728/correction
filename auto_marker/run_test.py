@@ -41,7 +41,7 @@ def run_pipeline(pdf_name: str):
     from monitor.processor import process_pdf
 
     incoming = ROOT / "data" / "incoming" / pdf_name
-    src = ROOT / pdf_name
+    src = ROOT / "data" / "test_samples" / pdf_name
     src_existed = src.exists()
 
     # 备份源文件（如果存在）

@@ -4,7 +4,8 @@ import sys
 import logging
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 
 PDF = "301_2026-06-18_003.pdf"
@@ -16,11 +17,10 @@ print(f"✅ 识别引擎: {RECOGNITION_ENGINE}")
 
 # 运行完整流水线
 from monitor.processor import process_pdf
-root = Path(__file__).resolve().parent
-pdf_path = root / PDF
+pdf_path = ROOT / "data" / "test_samples" / PDF
 if not pdf_path.exists():
     # 尝试从 backup 恢复
-    backup = root / "data" / "backup" / PDF
+    backup = ROOT / "data" / "backup" / PDF
     if backup.exists():
         shutil.copy2(str(backup), str(pdf_path))
         print(f"📄 已从 backup 恢复: {PDF}")
