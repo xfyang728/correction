@@ -1117,5 +1117,78 @@ class TestCoordSourceTracking:
                 f"路径 D 应标记 fallback_text_parse，实际={r.get('coord_source')}"
 
 
+# ============================================================
+# 真实置信度字段（conf）解析
+# ============================================================
+
+class TestConfFieldParsing:
+    """验证 Qwen3-VL 输出的 conf 字段解析与回退逻辑。
+
+    覆盖：
+    - prompt 模板含 conf 字段说明
+    - _parse_page_level_json 正确解析 conf
+    - conf 越界值被 clamp
+    - conf 缺失时返回 None（后续回退到伪置信度）
+    """
+
+    def test_prompt_template_includes_conf_field(self):
+        """prompt 模板应包含 conf 字段说明和示例。"""
+        from core.recognition_config import QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE
+
+        # 字段说明
+        assert "conf" in QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE, "prompt 应包含 conf 字段说明"
+        assert "识别置信度" in QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE, "prompt 应说明 conf 含义"
+        # few-shot 示例含 conf
+        assert '"conf":0.95' in QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE, \
+            "prompt few-shot 示例应含 conf 字段"
+        # 强调不要恒输出高值
+        assert "不要恒输出高值" in QWEN_VL_PAGE_LEVEL_PROMPT_TEMPLATE, \
+            "prompt 应强调 conf 反映真实把握程度"
+
+    def test_parse_json_extracts_conf(self):
+        """_parse_page_level_json 正确解析 conf 字段。"""
+        from core.qwen_vl_recognizer import _parse_page_level_json
+
+        response = '''[
+            {"q":"（1）","chars":[{"c":"随","bbox":[0.12,0.45,0.16,0.52],"conf":0.95}]}
+        ]'''
+        result = _parse_page_level_json(response)
+        assert result is not None
+        assert len(result) == 1
+        chars = result[0]["chars"]
+        assert len(chars) == 1
+        assert chars[0]["char"] == "随"
+        assert chars[0]["conf"] == 0.95
+
+    def test_parse_json_conf_clamp(self):
+        """conf 越界值（>1 或 <0）被 clamp 到 [0,1]。"""
+        from core.qwen_vl_recognizer import _parse_page_level_json
+
+        response = '''[
+            {"q":"（1）","chars":[
+                {"c":"随","bbox":[0.12,0.45,0.16,0.52],"conf":1.5},
+                {"c":"君","bbox":[0.16,0.45,0.20,0.52],"conf":-0.3}
+            ]}
+        ]'''
+        result = _parse_page_level_json(response)
+        assert result is not None
+        chars = result[0]["chars"]
+        assert chars[0]["conf"] == 1.0, f"1.5 应 clamp 到 1.0，实际={chars[0]['conf']}"
+        assert chars[1]["conf"] == 0.0, f"-0.3 应 clamp 到 0.0，实际={chars[1]['conf']}"
+
+    def test_parse_json_conf_missing_returns_none(self):
+        """conf 缺失时返回 None，后续回退到伪置信度。"""
+        from core.qwen_vl_recognizer import _parse_page_level_json
+
+        response = '''[
+            {"q":"（1）","chars":[{"c":"随","bbox":[0.12,0.45,0.16,0.52]}]}
+        ]'''
+        result = _parse_page_level_json(response)
+        assert result is not None
+        chars = result[0]["chars"]
+        assert len(chars) == 1
+        assert chars[0]["conf"] is None, "conf 缺失时应返回 None"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

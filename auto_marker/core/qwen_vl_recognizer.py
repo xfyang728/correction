@@ -323,9 +323,19 @@ def _parse_page_level_json(response: str) -> list[dict] | None:
             if x1 <= x0 or y1 <= y0:
                 all_valid = False
                 break
-            # 一个 c 可能含多字（模型误拼），逐字添加同一 bbox
+            # 解析 conf 字段（模型真实置信度，缺失或非法时回退 None）
+            conf_raw = ch_item.get("conf")
+            if conf_raw is None:
+                conf_value = None
+            else:
+                try:
+                    conf_value = float(conf_raw)
+                    conf_value = max(0.0, min(1.0, conf_value))  # clamp 到 [0,1]
+                except (TypeError, ValueError):
+                    conf_value = None
+            # 一个 c 可能含多字（模型误拼），逐字添加同一 bbox 和 conf
             for c in cn_chars:
-                parsed_chars.append({"char": c, "bbox_norm": (x0, y0, x1, y1)})
+                parsed_chars.append({"char": c, "bbox_norm": (x0, y0, x1, y1), "conf": conf_value})
 
         if not all_valid:
             # 标记该题无效，但保留 q_marker 以便上层决定回退
@@ -1209,11 +1219,13 @@ def _split_merged_json_chars(
         conf = _estimate_confidence(chunk, std_chars, is_invalid=False)
         for ci in chunk:
             pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
+            # 优先使用模型真实 conf，缺失时回退到伪置信度
+            model_conf = ci.get("conf")
             results.append({
                 "page": page_idx,
                 "bbox_pixel": pixel_bbox,
                 "char": ci["char"],
-                "confidence": conf,
+                "confidence": model_conf if model_conf is not None else conf,
                 "question_idx": current_q_idx,
                 "img_pixel_w": img_w,
                 "img_pixel_h": img_h,
@@ -1426,11 +1438,13 @@ def recognize_page_level(
                     conf = _estimate_confidence(char_items, std_chars, is_invalid=False)
                     for ci in clamped_items:
                         pixel_bbox = _norm_to_pixel_bbox(ci["bbox_norm"], img_w, img_h)
+                        # 优先使用模型真实 conf，缺失时回退到伪置信度
+                        model_conf = ci.get("conf")
                         all_results.append({
                             "page": page_idx,
                             "bbox_pixel": pixel_bbox,
                             "char": ci["char"],
-                            "confidence": conf,
+                            "confidence": model_conf if model_conf is not None else conf,
                             "question_idx": q_idx,
                             "img_pixel_w": img_w,
                             "img_pixel_h": img_h,
