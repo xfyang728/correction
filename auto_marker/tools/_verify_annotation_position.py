@@ -8,7 +8,7 @@
 用法: python tools/_verify_annotation_position.py
 """
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import fitz
@@ -51,6 +51,25 @@ def main():
         first_char = v[0].get("char", "")
         print(f"{qi:>6} {len(v):>3} ({x0:>4},{x1:>4}) ({y0:>4},{y1:>4}) "
               f"{correct:>4} {wrong:>4} {uncertain:>4}  {first_char}")
+
+    # 坐标来源分布统计（page_level 模式 4 条路径追踪）
+    print("\n坐标来源分布:")
+    coord_sources = Counter(r.get("coord_source", "unknown") for r in results)
+    total = len(results) if results else 1
+    for source, count in sorted(coord_sources.items()):
+        print(f"  {source:>25}: {count:>3} 字 ({count/total*100:.1f}%)")
+
+    # 按 q_idx × coord_source 交叉表（识别哪些题走了 fallback）
+    print(f"\n{'q_idx':>6} {'coord_source':>25} {'n':>3}")
+    print("-" * 40)
+    q_source: dict = defaultdict(Counter)
+    for r in results:
+        qi = r.get("question_idx", -1)
+        src = r.get("coord_source", "unknown")
+        q_source[qi][src] += 1
+    for qi in sorted(q_source):
+        for src, cnt in q_source[qi].most_common():
+            print(f"{qi:>6} {src:>25} {cnt:>3}")
 
     # 检查 PDF 中文字注记数量
     print()

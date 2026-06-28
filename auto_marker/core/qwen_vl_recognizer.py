@@ -1218,6 +1218,7 @@ def _split_merged_json_chars(
                 "img_pixel_w": img_w,
                 "img_pixel_h": img_h,
                 "engine": "qwen_vl_page_level",
+                "coord_source": "model_merged_split",
             })
 
         # 找不到下一题或无剩余时结束循环
@@ -1434,6 +1435,7 @@ def recognize_page_level(
                             "img_pixel_w": img_w,
                             "img_pixel_h": img_h,
                             "engine": "qwen_vl_page_level",
+                            "coord_source": "model_json",
                         })
                     json_success_count += 1
                     logger.debug("题号 '%s' q_idx=%d: 用模型坐标 (%d 字, conf=%.2f)",
@@ -1457,6 +1459,7 @@ def recognize_page_level(
                     # P1-4: invalid 题置信度 0.50
                     for r in split:
                         r["confidence"] = 0.50
+                        r["coord_source"] = "fallback_invalid"
                     all_results.extend(split)
                     logger.info("题号 '%s' q_idx=%d: 坐标无效，用标准答案等宽切分 (%d 字)",
                                 q_marker, q_idx, len(split))
@@ -1564,6 +1567,8 @@ def _fallback_text_path(
             chars, x_start, x_end, actual_y_start, actual_y_end,
             page_idx, q_idx, img_w, img_h,
         )
+        for r in split_results:
+            r["coord_source"] = "fallback_text_parse"
         all_results.extend(split_results)
 
     return all_results

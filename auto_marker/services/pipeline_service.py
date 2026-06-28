@@ -303,6 +303,13 @@ class PipelineService:
                     )
             all_results.extend(page_results)
 
+            # 坐标来源统计（仅 page_level 模式有意义，用于追踪 fallback 触发频率）
+            from collections import Counter
+            coord_sources = Counter(r.get("coord_source", "unknown") for r in page_results)
+            if any(k != "unknown" for k in coord_sources):
+                logger.info("第 %d 页: 坐标来源统计 %s",
+                            page_idx + 1, dict(coord_sources))
+
         doc.close()
         return all_results, question_regions
 

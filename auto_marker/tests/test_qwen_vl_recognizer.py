@@ -26,6 +26,7 @@ from core.qwen_vl_recognizer import (
     _question_marker_to_q_idx,
     _rescale_chars_x_to_region,
     _split_merged_json_chars,
+    recognize_page_level,
 )
 
 
@@ -963,6 +964,157 @@ class TestSplitMergedJsonChars:
         assert len(results) == 10
         q6_results = [r for r in results if r["question_idx"] == 6]
         assert len(q6_results) == 10, f"剩余应全部归题6，实际 q6={len(q6_results)}"
+
+    def test_merged_split_sets_coord_source(self):
+        """路径 B: 合并题拆分设置 coord_source='model_merged_split'。"""
+        char_items = self._make_merged_char_items(10)
+        std_answers = {
+            6: ["随", "君", "直", "到", "夜"],
+            7: ["人", "闲", "桂", "花", "落"],
+        }
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+            7: {
+                "y_start": 1281, "y_end": 1428,
+                "marker_bbox": (844, 1272, 1368, 1366),
+                "marker_text": "(8) 人闲桂花落",
+                "q_idx": 7,
+            },
+        }
+        hw_boxes = [{"bbox_pixel": (150, 1138, 655, 1217)}]
+
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=hw_boxes,
+        )
+        assert len(results) == 10
+        # 所有结果应标记为 model_merged_split
+        for r in results:
+            assert r["coord_source"] == "model_merged_split", \
+                f"合并题拆分应标记 model_merged_split，实际={r.get('coord_source')}"
+
+
+# ============================================================
+# coord_source 字段追踪（4 条坐标来源路径）
+# ============================================================
+
+class TestCoordSourceTracking:
+    """验证 recognize_page_level 的 4 条路径正确设置 coord_source 字段。
+
+    路径 A (model_json): JSON 模型坐标，经 rescale + clamp
+    路径 B (model_merged_split): 合并题拆分（在 TestSplitMergedJsonChars 中测试）
+    路径 C (fallback_invalid): 坐标无效，用标准答案等宽切分
+    路径 D (fallback_text_parse): JSON 解析失败，旧文本解析 + 等宽切分
+    """
+
+    IMG_W = 1653
+    IMG_H = 2312
+
+    def _make_img(self):
+        """构造测试用 numpy 图像。"""
+        import numpy as np
+        return np.full((self.IMG_H, self.IMG_W, 3), 255, dtype=np.uint8)
+
+    def _make_question_regions(self):
+        """构造题目区域列表（题1，q_idx=0）。"""
+        return [{
+            "page": 0,
+            "q_idx": 0,
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),
+            "marker_text": "（1）随君直到夜郎西",
+        }]
+
+    def _make_hw_boxes(self):
+        """构造手写区域列表。"""
+        return [{"bbox_pixel": (17, 738, 655, 817)}]
+
+    def _make_std_answers_text(self):
+        """构造标准答案文本。"""
+        return "（1）随君直到夜郎西"
+
+    def test_model_json_path_sets_coord_source(self, monkeypatch):
+        """路径 A: JSON 模型坐标设置 coord_source='model_json'。"""
+        # mock 返回有效 JSON（含合法 bbox）
+        valid_json = (
+            '[{"q":"（1）","chars":['
+            '{"c":"随","bbox":[0.12,0.45,0.16,0.52]},'
+            '{"c":"君","bbox":[0.16,0.45,0.20,0.52]}'
+            ']}]'
+        )
+        monkeypatch.setattr(
+            "core.qwen_vl_recognizer._call_qwen_vl_page_level",
+            lambda img, answers_text="": valid_json,
+        )
+
+        results = recognize_page_level(
+            self._make_img(),
+            self._make_question_regions(),
+            page_idx=0,
+            handwriting_boxes=self._make_hw_boxes(),
+            answers_text=self._make_std_answers_text(),
+        )
+
+        assert len(results) > 0, "路径 A 应有产出"
+        for r in results:
+            assert r["coord_source"] == "model_json", \
+                f"路径 A 应标记 model_json，实际={r.get('coord_source')}"
+
+    def test_invalid_path_sets_coord_source(self, monkeypatch):
+        """路径 C: 坐标无效（零宽 bbox）设置 coord_source='fallback_invalid'。"""
+        # mock 返回 invalid JSON（bbox 零宽 → is_invalid=True）
+        invalid_json = (
+            '[{"q":"（1）","chars":['
+            '{"c":"随","bbox":[0.5,0.5,0.5,0.6]},'
+            '{"c":"君","bbox":[0.5,0.5,0.5,0.6]}'
+            ']}]'
+        )
+        monkeypatch.setattr(
+            "core.qwen_vl_recognizer._call_qwen_vl_page_level",
+            lambda img, answers_text="": invalid_json,
+        )
+
+        results = recognize_page_level(
+            self._make_img(),
+            self._make_question_regions(),
+            page_idx=0,
+            handwriting_boxes=self._make_hw_boxes(),
+            answers_text=self._make_std_answers_text(),
+        )
+
+        assert len(results) > 0, "路径 C 应有产出（用标准答案等宽切分）"
+        for r in results:
+            assert r["coord_source"] == "fallback_invalid", \
+                f"路径 C 应标记 fallback_invalid，实际={r.get('coord_source')}"
+
+    def test_fallback_text_parse_sets_coord_source(self, monkeypatch):
+        """路径 D: JSON 解析失败设置 coord_source='fallback_text_parse'。"""
+        # mock 返回非 JSON 文本（触发 _fallback_text_path）
+        plain_text = "（1）随君直到夜郎西"
+        monkeypatch.setattr(
+            "core.qwen_vl_recognizer._call_qwen_vl_page_level",
+            lambda img, answers_text="": plain_text,
+        )
+
+        results = recognize_page_level(
+            self._make_img(),
+            self._make_question_regions(),
+            page_idx=0,
+            handwriting_boxes=self._make_hw_boxes(),
+            answers_text=self._make_std_answers_text(),
+        )
+
+        assert len(results) > 0, "路径 D 应有产出（旧文本解析 + 等宽切分）"
+        for r in results:
+            assert r["coord_source"] == "fallback_text_parse", \
+                f"路径 D 应标记 fallback_text_parse，实际={r.get('coord_source')}"
 
 
 if __name__ == "__main__":

@@ -82,6 +82,7 @@ def grade(ocr_results: list[dict], answers: list[str],
                 "question_idx": r.get("question_idx"),
                 "img_pixel_w": r["img_pixel_w"],
                 "img_pixel_h": r["img_pixel_h"],
+                "coord_source": r.get("coord_source", "unknown"),
             })
         elif ocr_idx is not None:
             # OCR 多识别的字（答案中没有对应位置）
@@ -96,6 +97,7 @@ def grade(ocr_results: list[dict], answers: list[str],
                 "question_idx": r.get("question_idx"),
                 "img_pixel_w": r["img_pixel_w"],
                 "img_pixel_h": r["img_pixel_h"],
+                "coord_source": r.get("coord_source", "unknown"),
             })
         # ans_idx is not None, ocr_idx is None 的情况（漏写）不生成条目
 
