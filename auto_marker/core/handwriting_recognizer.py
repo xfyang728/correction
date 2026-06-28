@@ -104,8 +104,10 @@ def recognize_handwriting(
 
     # ---- Step 1: 为每个手写区域匹配 OCR 记录 ----
     # 匹配规则：OCR 记录 rec_bbox 的中心点落在 handwriting_bbox 内
+    # 改进2: 移除 pop，允许同一手写框匹配多个 OCR 记录（多行/多段识别），
+    # 后续在 Step 1.5 按 x 坐标排序拼接，避免后续 OCR 记录被遗漏
     matched: list[dict] = []
-    unmatched_boxes = list(handwriting_boxes)
+    matched_box_ids: set[int] = set()  # 已匹配过的 hw_box 的 id
 
     for rec in ocr_records:
         if rec.get("page", 0) != page_idx:
@@ -115,12 +117,10 @@ def recognize_handwriting(
 
         # 找包含该中心点的手写框
         best_box = None
-        best_idx = -1
-        for i, hw_box in enumerate(unmatched_boxes):
+        for hw_box in handwriting_boxes:
             hw_bbox = hw_box["bbox_pixel"]
             if point_in_bbox(cx, cy, hw_bbox):
                 best_box = hw_box
-                best_idx = i
                 break
 
         if best_box is not None:
@@ -130,15 +130,50 @@ def recognize_handwriting(
                 "rec_score": rec["rec_score"],
                 "rec_bbox": rec_bbox,
             })
-            # 已匹配的框不再参与后续匹配
-            unmatched_boxes.pop(best_idx)
+            matched_box_ids.add(id(best_box))
+
+    unmatched_boxes = [b for b in handwriting_boxes if id(b) not in matched_box_ids]
 
     logger.info(
         "第 %d 页: %d 个手写区域, 匹配到 %d 条识别记录, %d 个未匹配",
         page_idx + 1, len(handwriting_boxes), len(matched), len(unmatched_boxes),
     )
 
-    # ---- Step 1.5: 对未匹配的合成条带运行 OCR ----
+    # ---- Step 1.5: 同一手写框的多 OCR 记录按 x 排序拼接 ----
+    # 改进2: 一个手写框内可能有多个 OCR 记录（PaddleOCR 把一行拆成多段），
+    # 按 rec_bbox 的 x_center 排序后拼接 rec_text，取最低 rec_score 作为整体置信度。
+    # 拼接后等价于单条 OCR 记录，Step 2 等宽切分行为不变。
+    grouped: dict[int, list[dict]] = {}
+    for m in matched:
+        box_id = id(m["handwriting_box"])
+        grouped.setdefault(box_id, []).append(m)
+
+    merged_matched: list[dict] = []
+    for box_id, group in grouped.items():
+        if len(group) == 1:
+            merged_matched.append(group[0])
+            continue
+        # 按 rec_bbox x_center 排序
+        group.sort(key=lambda m: (m["rec_bbox"][0] + m["rec_bbox"][2]) / 2)
+        merged_text = "".join(m["rec_text"] for m in group)
+        merged_score = min(m["rec_score"] for m in group)
+        # rec_bbox 取所有记录的并集
+        x0 = min(m["rec_bbox"][0] for m in group)
+        y0 = min(m["rec_bbox"][1] for m in group)
+        x1 = max(m["rec_bbox"][2] for m in group)
+        y1 = max(m["rec_bbox"][3] for m in group)
+        merged_matched.append({
+            "handwriting_box": group[0]["handwriting_box"],
+            "rec_text": merged_text,
+            "rec_score": merged_score,
+            "rec_bbox": (x0, y0, x1, y1),
+        })
+        logger.debug("手写框匹配 %d 条 OCR 记录，已拼接为 '%s' (score=%.3f)",
+                     len(group), merged_text, merged_score)
+
+    matched = merged_matched
+
+    # ---- Step 1.6: 对未匹配的合成条带运行 OCR ----
     # 这些条带来自 printed_question 框底部，没有现成的 OCR 记录与之匹配
     for hw_box in list(unmatched_boxes):
         if not hw_box.get("is_sub_region"):

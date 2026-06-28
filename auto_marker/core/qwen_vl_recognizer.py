@@ -900,11 +900,21 @@ def _clamp_chars_y_to_region(
     handwriting_boxes: list[dict] | None = None,
     img_w: int = 0,
 ) -> list[dict]:
-    """将 chars 的 y 坐标替换为 region/手写框的 y 范围。
+    """对 chars 的 y 坐标做混合修正：完全偏移用 replace，部分重叠用 clamp。
 
-    模型 bbox 的 y 系统性偏移（多题共享同一 y），直接用 layout_analyzer
-    检测的精确 y 范围替代，保留模型的 x 坐标。
+    模型 bbox 的 y 系统性偏移（多题共享同一 y 值），需要用 layout_analyzer
+    检测的精确 y 范围修正。三种情况：
+      1. 模型 y 完全在 region 外（系统性偏移）→ replace 为 region y（处理已知的多题共享 y 问题）
+      2. 模型 y 部分重叠 → clamp 到边界（保留模型 y 相对信息）
+      3. 模型 y 完全在 region 内 → 保留（模型 y 合理）
+
+    受 Y_CLAMP_ENABLED 开关控制：False 时完全保留模型 y（用于 A/B 测试）。
     """
+    from core.recognition_config import Y_CLAMP_ENABLED
+
+    if not Y_CLAMP_ENABLED:
+        return char_items  # 开关关闭时保留模型 y
+
     y_start, y_end = _estimate_question_y_range(region, handwriting_boxes, img_h, img_w)
     if y_start >= y_end:
         return char_items
@@ -916,8 +926,14 @@ def _clamp_chars_y_to_region(
     clamped = []
     for ci in char_items:
         x0, y0, x1, y1 = ci["bbox_norm"]
-        # 直接用 region/手写框的 y 范围替换模型 y（模型 y 不可靠）
-        clamped.append({**ci, "bbox_norm": (x0, norm_y0, x1, norm_y1)})
+        if y1 <= norm_y0 or y0 >= norm_y1:
+            # 情况 1：模型 y 完全在 region 外（系统性偏移）→ replace
+            clamped.append({**ci, "bbox_norm": (x0, norm_y0, x1, norm_y1)})
+        else:
+            # 情况 2/3：部分重叠或完全在内 → clamp（保留模型 y 相对信息）
+            clamped_y0 = max(y0, norm_y0)
+            clamped_y1 = min(y1, norm_y1)
+            clamped.append({**ci, "bbox_norm": (x0, clamped_y0, x1, clamped_y1)})
     return clamped
 
 
@@ -1155,7 +1171,18 @@ def _split_merged_json_chars(
 
     while remaining:
         std_chars = std_answers_by_qidx.get(current_q_idx, [])
-        if std_chars and len(remaining) > len(std_chars) + 2:
+
+        # 先查找下一题 q_idx（同格式范围内递增）
+        next_q_idx = None
+        for candidate in sorted(std_answers_by_qidx.keys()):
+            if candidate > current_q_idx and _q_idx_format_range(candidate) == fmt:
+                next_q_idx = candidate
+                break
+
+        # 找不到下一题标准答案时，剩余全部归当前题（符合 docstring 约定）
+        if next_q_idx is None:
+            take = len(remaining)
+        elif std_chars and len(remaining) > len(std_chars) + 2:
             # 取标准答案字数个字归当前题
             take = len(std_chars)
         else:
@@ -1169,8 +1196,14 @@ def _split_merged_json_chars(
         region = region_by_qidx.get(current_q_idx)
         if region:
             used_regions.add(current_q_idx)
-            # P2-6: clamp 到列范围 + y 范围
-            chunk = _clamp_chars_to_column(chunk, region, img_w, handwriting_boxes=None)
+            # 改进3: 修正合并题拆分后的 x 偏移/跨度 + clamp 列范围 + y 范围
+            # 1. clamp 到列范围（修复模型 x 落在错误列的情况）
+            chunk = _clamp_chars_to_column(chunk, region, img_w, handwriting_boxes)
+            # 2. rescale x（双重触发线性映射，传 answer_text 启用 marker_text 比例裁剪）
+            answer_text_str = "".join(std_chars) if std_chars else None
+            chunk = _rescale_chars_x_to_region(
+                chunk, region, img_w, handwriting_boxes, answer_text=answer_text_str)
+            # 3. clamp y（混合策略：完全偏移→replace，部分重叠→clamp）
             chunk = _clamp_chars_y_to_region(chunk, region, img_h, handwriting_boxes, img_w)
 
         conf = _estimate_confidence(chunk, std_chars, is_invalid=False)
@@ -1187,13 +1220,7 @@ def _split_merged_json_chars(
                 "engine": "qwen_vl_page_level",
             })
 
-        # 找下一题 q_idx（同格式范围内递增）
-        next_q_idx = None
-        for candidate in sorted(std_answers_by_qidx.keys()):
-            if candidate > current_q_idx and _q_idx_format_range(candidate) == fmt:
-                next_q_idx = candidate
-                break
-
+        # 找不到下一题或无剩余时结束循环
         if next_q_idx is None or not remaining:
             break
         current_q_idx = next_q_idx

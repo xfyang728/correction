@@ -25,6 +25,7 @@ from core.qwen_vl_recognizer import (
     _q_idx_format_range,
     _question_marker_to_q_idx,
     _rescale_chars_x_to_region,
+    _split_merged_json_chars,
 )
 
 
@@ -226,14 +227,15 @@ class TestEstimateQuestionYRange:
 # ============================================================
 
 class TestClampCharsYToRegion:
-    """模型 y 坐标替换为手写框 y 范围。"""
+    """模型 y 坐标混合修正：完全偏移用 replace，部分重叠用 clamp。"""
 
     IMG_W = 1653
     IMG_H = 2312
 
     def test_replaces_y_with_hw_box(self):
-        """y 被替换为手写框 y 范围，x 保留。"""
-        # 模型 y=0.45-0.52（错误，偏移到题5位置）
+        """模型 y 完全在 region 外（系统性偏移）→ replace 为手写框 y 范围。"""
+        # 模型 y=0.45-0.52（错误，偏移到题5位置），手写框 y=738-817（0.319-0.353）
+        # 0.45 > 0.353 → 完全在 region 外 → replace
         char_items = [
             {"char": "随", "bbox_norm": (0.12, 0.45, 0.16, 0.52)},
             {"char": "君", "bbox_norm": (0.16, 0.45, 0.20, 0.52)},
@@ -304,6 +306,55 @@ class TestClampCharsYToRegion:
         expected_y1 = 874 / self.IMG_H
         assert abs(result[0]["bbox_norm"][1] - expected_y0) < 0.001
         assert abs(result[0]["bbox_norm"][3] - expected_y1) < 0.001
+
+    def test_partial_overlap_clamps_to_boundary(self):
+        """模型 y 部分重叠 region → clamp 到边界（保留模型 y0 相对信息）。"""
+        # region y=995-1088（0.430-0.471），模型 y=0.45-0.52
+        # y0=0.45 在 [0.430, 0.471] 内，y1=0.52 > 0.471 → 部分重叠 → clamp
+        char_items = [
+            {"char": "人", "bbox_norm": (0.12, 0.45, 0.16, 0.52)},
+        ]
+        region = {"y_start": 1004, "y_end": 1134, "marker_bbox": (15, 995, 679, 1088)}
+        hw_boxes = [{"bbox_pixel": (15, 995, 679, 1088)}]
+        result = _clamp_chars_y_to_region(char_items, region, self.IMG_H, hw_boxes, self.IMG_W)
+
+        norm_y0 = 995 / self.IMG_H  # 0.430
+        norm_y1 = 1088 / self.IMG_H  # 0.471
+        # clamp：y0 = max(0.45, 0.430) = 0.45（保留模型 y0），y1 = min(0.52, 0.471) = 0.471
+        assert abs(result[0]["bbox_norm"][1] - 0.45) < 0.001, \
+            f"部分重叠时应保留模型 y0=0.45, 实际={result[0]['bbox_norm'][1]}"
+        assert abs(result[0]["bbox_norm"][3] - norm_y1) < 0.001, \
+            f"部分重叠时 y1 应 clamp 到 {norm_y1}, 实际={result[0]['bbox_norm'][3]}"
+
+    def test_fully_inside_preserves_model_y(self):
+        """模型 y 完全在 region 内 → 保留模型 y（不修改）。"""
+        # region y=738-817（0.319-0.353），模型 y=0.33-0.34（完全在内）
+        char_items = [
+            {"char": "随", "bbox_norm": (0.12, 0.33, 0.16, 0.34)},
+        ]
+        region = {"y_start": 746, "y_end": 874, "marker_bbox": (17, 675, 655, 817)}
+        hw_boxes = [{"bbox_pixel": (17, 738, 655, 817)}]
+        result = _clamp_chars_y_to_region(char_items, region, self.IMG_H, hw_boxes, self.IMG_W)
+
+        # 完全在内 → clamp 不改变（max(0.33, 0.319)=0.33, min(0.34, 0.353)=0.34）
+        assert result[0]["bbox_norm"][1] == 0.33, "完全在内时应保留模型 y0"
+        assert result[0]["bbox_norm"][3] == 0.34, "完全在内时应保留模型 y1"
+
+    def test_y_clamp_disabled_preserves_model_y(self, monkeypatch):
+        """Y_CLAMP_ENABLED=False 时完全保留模型 y（A/B 测试开关）。"""
+        import core.recognition_config as cfg
+        monkeypatch.setattr(cfg, "Y_CLAMP_ENABLED", False)
+
+        # 模型 y=0.45-0.52（明显偏移），但开关关闭 → 保留
+        char_items = [
+            {"char": "随", "bbox_norm": (0.12, 0.45, 0.16, 0.52)},
+        ]
+        region = {"y_start": 746, "y_end": 874, "marker_bbox": (17, 675, 655, 817)}
+        hw_boxes = [{"bbox_pixel": (17, 738, 655, 817)}]
+        result = _clamp_chars_y_to_region(char_items, region, self.IMG_H, hw_boxes, self.IMG_W)
+
+        assert result[0]["bbox_norm"][1] == 0.45, "开关关闭时应保留模型 y0"
+        assert result[0]["bbox_norm"][3] == 0.52, "开关关闭时应保留模型 y1"
 
 
 # ============================================================
@@ -736,6 +787,182 @@ class TestMultiQuestionScenario:
         y2 = r2[0]["bbox_norm"][1] * self.IMG_H
         assert abs(y1 - 738) < 5, f"题1 应匹配左列 y=738, got {y1}"
         assert abs(y2 - 666) < 5, f"题2 应匹配右列 y=666, got {y2}"
+
+
+# ============================================================
+# _split_merged_json_chars（改进3：合并题拆分 + rescale）
+# ============================================================
+
+class TestSplitMergedJsonChars:
+    """合并题拆分 — 验证改进3：传 handwriting_boxes + 调用 rescale。
+
+    改进3 的改动：
+    1. _clamp_chars_to_column 传 handwriting_boxes（而非 None）
+    2. 在 clamp_column 之后、clamp_y 之前，插入 _rescale_chars_x_to_region
+    """
+
+    IMG_W = 1653
+    IMG_H = 2312
+
+    def _make_merged_char_items(self, n_chars: int, x_offset_norm: float = 0.0):
+        """构造合并题的 char_items（模型输出，归一化坐标）。"""
+        items = []
+        # 模拟模型把两题合并输出，x 从 0.2 开始，每字间隔 0.03
+        for i in range(n_chars):
+            x0 = 0.2 + i * 0.03 + x_offset_norm
+            x1 = x0 + 0.025
+            items.append({
+                "char": f"字{i}",
+                "bbox_norm": (x0, 0.45, x1, 0.52),  # 模型 y 偏移（典型）
+            })
+        return items
+
+    def test_split_into_two_questions(self):
+        """合并题按标准答案字数拆分为两题。"""
+        # 题7（q_idx=6）5字 + 题8（q_idx=7）5字 = 10字合并
+        char_items = self._make_merged_char_items(10)
+        std_answers = {
+            6: ["随", "君", "直", "到", "夜"],
+            7: ["人", "闲", "桂", "花", "落"],
+        }
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+            7: {
+                "y_start": 1281, "y_end": 1428,
+                "marker_bbox": (14, 1272, 556, 1366),
+                "marker_text": "(8) 人闲桂花落",
+                "q_idx": 7,
+            },
+        }
+        hw_boxes = [
+            {"bbox_pixel": (150, 1138, 655, 1217)},  # 题7 手写框
+            {"bbox_pixel": (150, 1285, 655, 1364)},  # 题8 手写框
+        ]
+
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=hw_boxes,
+        )
+
+        # 应拆分为 10 字，前 5 字归 q_idx=6，后 5 字归 q_idx=7
+        assert len(results) == 10, f"应拆分 10 字，实际={len(results)}"
+        q6_chars = [r for r in results if r["question_idx"] == 6]
+        q7_chars = [r for r in results if r["question_idx"] == 7]
+        assert len(q6_chars) == 5
+        assert len(q7_chars) == 5
+
+    def test_rescale_applied_to_split_chunks(self):
+        """合并题拆分后，各 chunk 的 x 经过 rescale 修正（偏移超阈时）。"""
+        # 模型 x 偏移很大（整体偏移 200px）
+        char_items = self._make_merged_char_items(10, x_offset_norm=0.15)
+        std_answers = {
+            6: ["随", "君", "直", "到", "夜"],
+            7: ["人", "闲", "桂", "花", "落"],
+        }
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+        }
+        hw_boxes = [
+            {"bbox_pixel": (150, 1138, 655, 1217)},
+        ]
+
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=hw_boxes,
+        )
+
+        # 题6 的 5 字应经过 rescale，x 偏移应被修正
+        q6_results = [r for r in results if r["question_idx"] == 6]
+        assert len(q6_results) == 5
+        # 验证 x 在合理范围内（手写框 x=150~655）
+        for r in q6_results:
+            x_center = (r["bbox_pixel"][0] + r["bbox_pixel"][2]) / 2
+            # rescale 后 x 应在 [150, 655] 附近（允许边界误差）
+            assert 100 < x_center < 700, \
+                f"rescale 后 x_center 应在 [150, 655] 附近，实际={x_center}"
+
+    def test_handwriting_boxes_not_none(self):
+        """传 handwriting_boxes（非 None）时不崩溃，且能用于 x 范围估算。"""
+        char_items = self._make_merged_char_items(5)
+        std_answers = {6: ["随", "君", "直", "到", "夜"]}
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+        }
+        hw_boxes = [{"bbox_pixel": (150, 1138, 655, 1217)}]
+
+        # 不应抛出异常
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=hw_boxes,
+        )
+        assert len(results) == 5
+
+    def test_none_handwriting_boxes_no_crash(self):
+        """handwriting_boxes=None 时不崩溃（向后兼容）。"""
+        char_items = self._make_merged_char_items(5)
+        std_answers = {6: ["随", "君", "直", "到", "夜"]}
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+        }
+
+        # handwriting_boxes=None 不应崩溃
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=None,
+        )
+        assert len(results) == 5
+
+    def test_no_region_for_second_question(self):
+        """找不到下一题标准答案时，剩余全部归当前题（符合 docstring 约定）。"""
+        char_items = self._make_merged_char_items(10)
+        std_answers = {
+            6: ["随", "君", "直", "到", "夜"],
+            # 题7 无标准答案
+        }
+        region_by_qidx = {
+            6: {
+                "y_start": 1134, "y_end": 1281,
+                "marker_bbox": (14, 1125, 556, 1219),
+                "marker_text": "(7) 随君直到夜",
+                "q_idx": 6,
+            },
+            # 题7 无 region
+        }
+        hw_boxes = [{"bbox_pixel": (150, 1138, 655, 1217)}]
+
+        results = _split_merged_json_chars(
+            char_items, 6, std_answers, region_by_qidx,
+            page_idx=0, img_w=self.IMG_W, img_h=self.IMG_H,
+            used_regions=set(), handwriting_boxes=hw_boxes,
+        )
+        # 找不到下一题（std_answers 无 key 7）→ 剩余全部归题6
+        assert len(results) == 10
+        q6_results = [r for r in results if r["question_idx"] == 6]
+        assert len(q6_results) == 10, f"剩余应全部归题6，实际 q6={len(q6_results)}"
 
 
 if __name__ == "__main__":

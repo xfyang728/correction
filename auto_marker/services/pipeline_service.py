@@ -190,7 +190,6 @@ class PipelineService:
             (all_results, question_regions)
         """
         from core.handwriting_recognizer import recognize_handwriting
-        from core.image_processor import preprocess_image
         from core.layout_analyzer import analyze_layout
         from core.text_detector import detect_text
 
@@ -211,10 +210,12 @@ class PipelineService:
 
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
-            # Step A: 图像预处理
-            processed_img = preprocess_image(img)
+            # Step A: 图像预处理（返回图像 + deskew 角度，用于 page_level 路径坐标空间统一）
+            from core.image_processor import preprocess_image_with_angle, apply_deskew
+            processed_img, deskew_angle = preprocess_image_with_angle(img)
             processed_np = np.array(processed_img)
-            logger.debug("第 %d 页: 预处理完成 (%dx%d)", page_idx + 1, img.width, img.height)
+            logger.debug("第 %d 页: 预处理完成 (%dx%d, deskew=%.2f°)",
+                         page_idx + 1, img.width, img.height, deskew_angle)
 
             # Step B: 文本检测（带缓存）
             cached = _load_ocr_cache(file_hash, page_idx)
@@ -249,11 +250,14 @@ class PipelineService:
                 from core.qwen_vl_recognizer import recognize_page_level
                 from core.recognition_config import QWEN_VL_USE_DESKEW
                 # 整页识别：默认用原始图像；可选倾斜校正（P1-5）
+                # 改进1: 用 preprocess_image_with_angle 返回的相同角度 deskew original_np，
+                # 确保 question_regions/hw_boxes（processed_np 空间）与 Qwen3-VL 输出
+                # （original_np 空间）坐标空间一致，消除倾斜扫描下的系统性偏移
                 original_np = np.array(img)
-                if QWEN_VL_USE_DESKEW:
-                    from core.image_processor import deskew_only
-                    original_np = deskew_only(original_np)
-                    logger.debug("第 %d 页: VL 路径已启用倾斜校正", page_idx + 1)
+                if QWEN_VL_USE_DESKEW and abs(deskew_angle) >= 0.3:
+                    original_np = apply_deskew(original_np, deskew_angle)
+                    logger.debug("第 %d 页: VL 路径已应用相同 deskew 角度 %.2f°（坐标空间统一）",
+                                 page_idx + 1, deskew_angle)
                 # 使用 question_regions + hw_boxes 确定书写区域
                 page_question_regions = question_regions.get(page_idx, [])
                 if not page_question_regions:

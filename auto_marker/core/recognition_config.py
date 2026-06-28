@@ -57,9 +57,14 @@ QWEN_VL_PAGE_LEVEL_TIMEOUT = 120
 QWEN_VL_USE_DESKEW = False
 
 # P3: 文字渲染模式开关
-# True = 将识别文字直接渲染到模型 bbox 位置（覆盖原文），跳过坐标 clamp
-# False = 传统标记模式（勾/圈/三角），启用坐标 clamp 修正
+# True = 将识别文字直接渲染到 bbox 位置（覆盖原文），应用 y-clamp + 条件性 x-rescale
+# False = 传统标记模式（勾/圈/三角），应用 y-clamp + x-clamp
 RENDER_TEXT_MODE = True
+
+# Y 坐标 clamp 开关（page_level 模式）
+# True = 启用 Y clamp（仅当模型 y 超出 region 范围时才修正到边界，保留逐字 y 相对信息）
+# False = 完全保留模型 y（用于 A/B 测试）
+Y_CLAMP_ENABLED = True
 
 # ---- 双路合并策略 ----
 # "paddle_priority": PaddleOCR 为主，Qwen3-VL 仅在低置信度时覆盖

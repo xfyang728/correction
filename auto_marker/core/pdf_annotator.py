@@ -115,9 +115,10 @@ def _draw_text_at_bbox(can: canvas.Canvas, char: str,
     # 字号：根据 bbox 高度自适应，最小 8pt，最大 24pt
     font_size = max(min(bh * 0.9, 24), 8)
 
-    # 文字左下角（PDF 坐标系 y 向上）
+    # 文字基线左端点（PDF 坐标系 y 向上，reportlab drawString 的 y 是基线）
+    # 中文字体基线约为 bbox 高度的 20%（ascender ratio ≈ 0.8）
     text_x = min(x0_page, x1_page)
-    text_y = min(y0_page, y1_page) + bh * 0.1
+    text_y = min(y0_page, y1_page) + bh * 0.2
 
     # 半透明背景（增强可读性）
     if alpha < 1.0:
