@@ -357,6 +357,63 @@ class TestClampCharsYToRegion:
         assert result[0]["bbox_norm"][1] == 0.45, "开关关闭时应保留模型 y0"
         assert result[0]["bbox_norm"][3] == 0.52, "开关关闭时应保留模型 y1"
 
+    def test_replace_preserves_relative_y(self):
+        """情况 1a: 模型 y 有逐字相对信息（span > 0.01）→ 按比例映射到 region。
+
+        场景: 两个字模型 y 不同（0.45-0.50 和 0.48-0.52），span=0.07
+              region y=738-817 (0.319-0.353), region_y_span=0.034
+              字1 (y0=0.45): new_y0 = 0.319 + 0/0.07*0.034 = 0.319
+              字2 (y0=0.48): new_y0 = 0.319 + 0.03/0.07*0.034 ≈ 0.3336
+              两字 new_y0 不同，保留相对高低
+        """
+        char_items = [
+            {"char": "随", "bbox_norm": (0.12, 0.45, 0.16, 0.50)},  # y0=0.45
+            {"char": "君", "bbox_norm": (0.16, 0.48, 0.20, 0.52)},  # y0=0.48（更高）
+        ]
+        region = {"y_start": 746, "y_end": 874, "marker_bbox": (17, 675, 655, 817)}
+        hw_boxes = [{"bbox_pixel": (17, 738, 655, 817)}]
+        result = _clamp_chars_y_to_region(char_items, region, self.IMG_H, hw_boxes, self.IMG_W)
+
+        norm_y0 = 738 / self.IMG_H  # 0.319
+        norm_y1 = 817 / self.IMG_H  # 0.353
+        # 字1 (y0=0.45, model_y_min=0.45): new_y0 = 0.319 + 0 = 0.319
+        # 字2 (y0=0.48, model_y_min=0.45): new_y0 = 0.319 + (0.48-0.45)/0.07 * 0.034 ≈ 0.3336
+        expected_y0_char1 = norm_y0  # 0.319
+        expected_y0_char2 = norm_y0 + (0.48 - 0.45) / 0.07 * (norm_y1 - norm_y0)  # ≈ 0.3336
+
+        assert abs(result[0]["bbox_norm"][1] - expected_y0_char1) < 0.001, \
+            f"字1 new_y0={result[0]['bbox_norm'][1]}, 预期 {expected_y0_char1}"
+        assert abs(result[1]["bbox_norm"][1] - expected_y0_char2) < 0.001, \
+            f"字2 new_y0={result[1]['bbox_norm'][1]}, 预期 {expected_y0_char2}"
+        # 两字 y0 不同，保留相对高低
+        assert result[1]["bbox_norm"][1] > result[0]["bbox_norm"][1], \
+            "字2 (模型 y0=0.48) 应高于字1 (模型 y0=0.45)"
+
+    def test_replace_no_relative_y(self):
+        """情况 1b: 模型 y 无相对信息（span < 0.01）→ 回退到原 replace 行为。
+
+        场景: 两个字模型 y 完全相同（0.45-0.52），span=0.07 > 0.01
+              但若所有字 y 都相同，映射后也都相同（等价于 replace）
+              这里测试 span < 0.01 的极端情况：所有字 y 几乎相同
+        """
+        # 两个字 y 范围几乎相同（span=0.005 < 0.01）
+        char_items = [
+            {"char": "随", "bbox_norm": (0.12, 0.45, 0.16, 0.455)},
+            {"char": "君", "bbox_norm": (0.16, 0.45, 0.20, 0.455)},
+        ]
+        region = {"y_start": 746, "y_end": 874, "marker_bbox": (17, 675, 655, 817)}
+        hw_boxes = [{"bbox_pixel": (17, 738, 655, 817)}]
+        result = _clamp_chars_y_to_region(char_items, region, self.IMG_H, hw_boxes, self.IMG_W)
+
+        norm_y0 = 738 / self.IMG_H  # 0.319
+        norm_y1 = 817 / self.IMG_H  # 0.353
+        # span < 0.01 → 回退到 replace，两字 y 都替换为 (norm_y0, norm_y1)
+        for ci in result:
+            assert abs(ci["bbox_norm"][1] - norm_y0) < 0.001, \
+                f"无相对信息时 y0 应 replace 为 {norm_y0}, 实际={ci['bbox_norm'][1]}"
+            assert abs(ci["bbox_norm"][3] - norm_y1) < 0.001, \
+                f"无相对信息时 y1 应 replace 为 {norm_y1}, 实际={ci['bbox_norm'][3]}"
+
 
 # ============================================================
 # _find_answer_start_in_marker
@@ -415,7 +472,10 @@ class TestEstimateQuestionXRange:
 
         场景: marker_text="(1) 随君直到夜郎西", marker_bbox=(17, _, 655, _)
               答案在 marker_text 索引 4（11 字中第 5 字起）
-              预期 x_start = 17 + 4/11 * (655-17) ≈ 249
+              按字符宽度权重计算（CJK=2, ASCII=1）：
+              total_weight = 4*1 + 7*2 = 18，weight_per_pixel = 638/18 ≈ 35.44
+              x_start = 17 + 4*35.44 ≈ 158
+              x_end = 158 + 14*35.44 ≈ 654
         """
         region = {
             "y_start": 746,
@@ -425,11 +485,12 @@ class TestEstimateQuestionXRange:
         }
         x_start, x_end = _estimate_question_x_range(
             region, None, self.IMG_W, answer_text="随君直到夜郎西")
-        # 答案从索引 4 开始，char_w = 638/11 ≈ 58
-        # x_start = 17 + 4*58 = 249
-        # x_end = 249 + 7*58 = 655 (但 min(655, marker[2]=655) = 655)
-        assert x_start == 249, f"x_start={x_start}, 预期 249"
-        assert x_end == 655, f"x_end={x_end}, 预期 655"
+        # 按权重：4 ASCII (前 4 字符) + 7 CJK (答案 7 字)
+        # total_weight = 4*1 + 7*2 = 18, weight_per_pixel = 638/18 ≈ 35.44
+        # x_start = 17 + 4*35.44 = 158.78 → 158
+        # x_end = 158 + 14*35.44 = 654.22 → 654 (min(654, 655) = 654)
+        assert x_start == 158, f"x_start={x_start}, 预期 158"
+        assert x_end == 654, f"x_end={x_end}, 预期 654"
 
     def test_proportional_estimate_right_column(self):
         """右列题目比例估算。"""
@@ -443,10 +504,10 @@ class TestEstimateQuestionXRange:
         }
         x_start, x_end = _estimate_question_x_range(
             region, None, self.IMG_W, answer_text="半竿斜日旧关城")
-        # char_w = 700/11 ≈ 63.6
-        # x_start = 823 + 4*63.6 = 1077
-        # x_end = 1077 + 7*63.6 = 1522 (min(1522, 1523) = 1522)
-        assert x_start == 1077, f"x_start={x_start}, 预期 1077"
+        # 按权重：total_weight = 4*1 + 7*2 = 18, weight_per_pixel = 700/18 ≈ 38.89
+        # x_start = 823 + 4*38.89 = 978.56 → 978
+        # x_end = 978 + 14*38.89 = 1522.44 → 1522 (min(1522, 1523) = 1522)
+        assert x_start == 978, f"x_start={x_start}, 预期 978"
         assert x_end == 1522, f"x_end={x_end}, 预期 1522"
 
     def test_answer_at_marker_start_no_trim(self):
@@ -570,6 +631,75 @@ class TestEstimateQuestionXRange:
         assert x_start == 289
         assert x_end == 733
 
+    def test_mixed_ascii_cjk_marker_text(self):
+        """Step 2: 混合 ASCII+CJK marker_text 按字符宽度权重计算 x_start。
+
+        验证：CJK=2, ASCII=1 的权重计算比等宽假设 (m_w/total_chars) 更靠左，
+        修正"首字偏右"问题。
+
+        场景: marker_text="(1) 随君直到夜郎西" (4 ASCII + 7 CJK)
+              等宽假设: char_w = m_w/11, x_start = marker[0] + 4*char_w
+              权重计算: weight_per_pixel = m_w/18, x_start = marker[0] + 4*weight_per_pixel
+              权重计算更靠左（4/18 < 4/11）
+        """
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),
+            "marker_text": "(1) 随君直到夜郎西",  # 4 ASCII + 7 CJK
+        }
+        x_start_weight, _ = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="随君直到夜郎西")
+
+        # 等宽假设的预期值（旧逻辑）
+        m_w = 655 - 17  # 638
+        char_w_equal = m_w / 11  # ≈ 58.0
+        x_start_equal = int(17 + 4 * char_w_equal)  # 249
+
+        # 权重计算的预期值（新逻辑）
+        total_weight = 4 * 1 + 7 * 2  # 18
+        weight_per_pixel = m_w / total_weight  # ≈ 35.44
+        x_start_weight_expected = int(17 + 4 * weight_per_pixel)  # 158
+
+        assert x_start_weight == x_start_weight_expected, \
+            f"权重计算 x_start={x_start_weight}, 预期 {x_start_weight_expected}"
+        assert x_start_weight < x_start_equal, \
+            f"权重计算 ({x_start_weight}) 应小于等宽假设 ({x_start_equal})，修正首字偏右"
+
+    def test_all_cjk_marker_text(self):
+        """Step 2: 全 CJK marker_text 行为与等宽假设一致（所有字符权重=2）。"""
+        region = {
+            "y_start": 1800,
+            "y_end": 2050,
+            "marker_bbox": (50, 1750, 1600, 2050),
+            "marker_text": "随君直到夜郎西",  # 7 CJK，无题号
+        }
+        # answer_text 在 marker_text 索引 0 → Step 2 不触发（answer_start=0）
+        # 回退到 Step 3/4
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="随君直到夜郎西")
+        # Step 3: 宽 1550 > 200，跳过
+        # Step 4: 无手写框，返回 (marker_bbox[2], img_w)
+        assert x_start == 1600
+        assert x_end == self.IMG_W
+
+    def test_all_ascii_marker_text(self):
+        """Step 2: 全 ASCII marker_text 权重计算与等宽假设一致（所有字符权重=1）。"""
+        region = {
+            "y_start": 746,
+            "y_end": 874,
+            "marker_bbox": (17, 675, 655, 817),
+            "marker_text": "(1) 12345",  # 9 ASCII，无 CJK
+        }
+        x_start, x_end = _estimate_question_x_range(
+            region, None, self.IMG_W, answer_text="12345")
+        # 全 ASCII: total_weight = 9*1 = 9 = len(marker_text)
+        # 与等宽假设一致: char_w = m_w/9, x_start = 17 + 4*char_w
+        m_w = 655 - 17  # 638
+        char_w_equal = m_w / 9  # ≈ 70.89
+        x_start_expected = int(17 + 4 * char_w_equal)  # 300
+        assert x_start == x_start_expected, f"全 ASCII x_start={x_start}, 预期 {x_start_expected}"
+
 
 # ============================================================
 # _rescale_chars_x_to_region
@@ -640,21 +770,24 @@ class TestRescaleCharsXToRegion:
     def test_answer_text_enables_step2_target(self):
         """传 answer_text 启用 Step 2，目标范围用 marker_text 比例裁剪。"""
         # marker_text="(1) 随君直到夜郎西"，marker_bbox=(17,_,655,_)
-        # Step 2: answer_start=4, char_w=638/11≈58, x_start=17+4*58=249, x_end=655
+        # Step 2 按字符宽度权重计算（CJK=2, ASCII=1）:
+        #   total_weight = 4*1 + 7*2 = 18, weight_per_pixel = 638/18 ≈ 35.44
+        #   answer_start_weight = 4 (前 4 ASCII 字符), x_start = 17 + 4*35.44 ≈ 158
+        #   answer_weight = 14 (7 CJK), x_end = 158 + 14*35.44 ≈ 654
         # 不传 answer_text 时走 Step 4（手写框回退），目标范围=(289,738)
         region = self._make_region()
         hw_boxes = [{"bbox_pixel": (289, 738, 738, 817)}]
-        # 模型首字在 100px（偏移 149px > 80），触发重缩放
+        # 模型首字在 50px（偏移 |50-158|=108px > 80），触发重缩放
         char_items = [
-            {"char": "随", "bbox_norm": (100/1653, 0.32, 150/1653, 0.35)},
+            {"char": "随", "bbox_norm": (50/1653, 0.32, 100/1653, 0.35)},
         ]
-        # 传 answer_text → Step 2 目标范围 (249, 655)
+        # 传 answer_text → Step 2 目标范围 (158, 654)
         result_with = _rescale_chars_x_to_region(
             char_items, region, self.IMG_W, hw_boxes,
             answer_text="随君直到夜郎西")
         new_x0_with = result_with[0]["bbox_norm"][0] * self.IMG_W
-        # 应映射到 Step 2 的 x_start=249（而非 Step 4 的 289）
-        assert abs(new_x0_with - 249) < 2, f"Step2 启用时 x0={new_x0_with}, 预期 ≈249"
+        # 应映射到 Step 2 的 x_start=158（而非 Step 4 的 289）
+        assert abs(new_x0_with - 158) < 2, f"Step2 启用时 x0={new_x0_with}, 预期 ≈158"
 
         # 不传 answer_text → Step 4 目标范围 (289, 738)
         result_without = _rescale_chars_x_to_region(

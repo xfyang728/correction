@@ -542,6 +542,17 @@ def _find_answer_start_in_marker(marker_text: str, answer_text: str) -> int | No
     return None
 
 
+def _char_width_weight(c: str) -> int:
+    """返回字符显示宽度权重：CJK/全角=2，ASCII/半角=1。
+
+    用于 marker_text 中混合 ASCII（题号 "(1) "）和 CJK（答案 "随君..."）的
+    宽度比例计算，避免等宽假设导致 x 偏移。
+    """
+    import unicodedata
+    w = unicodedata.east_asian_width(c)
+    return 2 if w in ('F', 'W', 'A') else 1
+
+
 def _estimate_question_x_range(
     region: dict,
     handwriting_boxes: list[dict] | None,
@@ -585,24 +596,26 @@ def _estimate_question_x_range(
 
     # ---- Step 2: 比例估算 — 用 marker_text 裁掉题号区域 ----
     # marker_text 包含整行文字（题号+答案），如 "(1) 随君直到夜郎西"。
-    # 在其中找到答案起始位置，按比例计算 x_start。
+    # 在其中找到答案起始位置，按字符宽度比例计算 x_start。
+    # 用 _char_width_weight 区分 CJK(=2) 和 ASCII(=1)，避免等宽假设高估 ASCII 宽度。
     if answer_text and marker_text and marker_bbox:
         answer_start = _find_answer_start_in_marker(marker_text, answer_text)
         if answer_start is not None and answer_start > 0:
-            total_chars = len(marker_text)
+            total_weight = sum(_char_width_weight(c) for c in marker_text)
             m_w = marker_bbox[2] - marker_bbox[0]
-            char_w = m_w / total_chars
-            x_start = int(marker_bbox[0] + answer_start * char_w)
-            # x_end: 答案结束位置 = x_start + 答案字数 * char_w
-            answer_chars = len(answer_text)
-            x_end = int(x_start + answer_chars * char_w)
+            weight_per_pixel = m_w / total_weight if total_weight > 0 else 0
+            answer_start_weight = sum(_char_width_weight(c) for c in marker_text[:answer_start])
+            x_start = int(marker_bbox[0] + answer_start_weight * weight_per_pixel)
+            # x_end: 答案结束位置 = x_start + 答案字数 * weight_per_pixel
+            answer_weight = sum(_char_width_weight(c) for c in answer_text)
+            x_end = int(x_start + answer_weight * weight_per_pixel)
             # 不超过 marker_bbox 右边界
             x_end = min(x_end, marker_bbox[2])
             logger.debug(
                 "X-estimate: marker_text='%s' answer='%s' start_idx=%d "
-                "char_w=%.1f x_start=%d x_end=%d",
+                "weight_per_pixel=%.1f x_start=%d x_end=%d",
                 marker_text[:20], answer_text[:10], answer_start,
-                char_w, x_start, x_end,
+                weight_per_pixel, x_start, x_end,
             )
             return x_start, x_end
 
@@ -933,12 +946,33 @@ def _clamp_chars_y_to_region(
     norm_y0 = y_start / img_h
     norm_y1 = y_end / img_h
 
+    # 预计算模型 y 跨度（用于判断是否有逐字相对信息）
+    # 当模型 y 跨度 > 0.01 时，保留逐字相对位置按比例映射到 region；
+    # 跨度过小（多题共享同一 y）时回退到原 replace 行为，避免引入噪声。
+    model_y_min = min(ci["bbox_norm"][1] for ci in char_items) if char_items else 0
+    model_y_max = max(ci["bbox_norm"][3] for ci in char_items) if char_items else 0
+    model_y_span = model_y_max - model_y_min
+    region_y_span = norm_y1 - norm_y0
+
     clamped = []
     for ci in char_items:
         x0, y0, x1, y1 = ci["bbox_norm"]
         if y1 <= norm_y0 or y0 >= norm_y1:
-            # 情况 1：模型 y 完全在 region 外（系统性偏移）→ replace
-            clamped.append({**ci, "bbox_norm": (x0, norm_y0, x1, norm_y1)})
+            # 情况 1：模型 y 完全在 region 外（系统性偏移）
+            if model_y_span > 0.01 and region_y_span > 0:
+                # 1a: 模型有逐字 y 相对信息 → 按比例映射到 region
+                # 保留字的相对高低位置，bh 更贴近实际
+                new_y0 = norm_y0 + (y0 - model_y_min) / model_y_span * region_y_span
+                new_y1 = norm_y0 + (y1 - model_y_min) / model_y_span * region_y_span
+                # 保证 y0 < y1 且在 region 内
+                new_y0 = max(norm_y0, min(norm_y1, new_y0))
+                new_y1 = max(norm_y0, min(norm_y1, new_y1))
+                if new_y1 <= new_y0:
+                    new_y0, new_y1 = norm_y0, norm_y1
+                clamped.append({**ci, "bbox_norm": (x0, new_y0, x1, new_y1)})
+            else:
+                # 1b: 模型 y 无相对信息（多题共享同一 y）→ 直接 replace
+                clamped.append({**ci, "bbox_norm": (x0, norm_y0, x1, norm_y1)})
         else:
             # 情况 2/3：部分重叠或完全在内 → clamp（保留模型 y 相对信息）
             clamped_y0 = max(y0, norm_y0)

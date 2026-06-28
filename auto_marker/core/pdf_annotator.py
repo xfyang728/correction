@@ -116,9 +116,11 @@ def _draw_text_at_bbox(can: canvas.Canvas, char: str,
     font_size = max(min(bh * 0.9, 24), 8)
 
     # 文字基线左端点（PDF 坐标系 y 向上，reportlab drawString 的 y 是基线）
-    # 中文字体基线约为 bbox 高度的 20%（ascender ratio ≈ 0.8）
+    # 垂直居中：基线 = bbox_bottom + (bh - font_size * ascender_ratio) / 2
+    # 中文字体 ascender ratio ≈ 0.8，文字视觉中心在基线上方 0.4*font_size
+    # 代入后文字视觉中心 = bbox_bottom + bh/2，与 bbox 中心重合
     text_x = min(x0_page, x1_page)
-    text_y = min(y0_page, y1_page) + bh * 0.2
+    text_y = min(y0_page, y1_page) + (bh - font_size * 0.8) / 2
 
     # 半透明背景（增强可读性）
     if alpha < 1.0:
