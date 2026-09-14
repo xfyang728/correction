@@ -1,0 +1,110 @@
+[
+  {
+    "chapter": "coldopen",
+    "step": 1,
+    "text": "你猜一个语文老师，每天改 40 本默写本要多久？",
+    "audio": "coldopen/1.mp3"
+  },
+  {
+    "chapter": "coldopen",
+    "step": 2,
+    "text": "一小时起步。",
+    "audio": "coldopen/2.mp3"
+  },
+  {
+    "chapter": "coldopen",
+    "step": 3,
+    "text": "重点是，里面大部分都是重复劳动。随君直到夜郎西，海内存知己，一遍一遍对着标准答案勾勾画画。",
+    "audio": "coldopen/3.mp3"
+  },
+  {
+    "chapter": "what-it-does",
+    "step": 1,
+    "text": "所以我自己做了一个工具。丢一张 PDF 扫描页进去，5 秒出来一份批改完的报告。正确打绿勾，错误打红叉，看不清的标橙色问号。",
+    "audio": "what-it-does/1.mp3"
+  },
+  {
+    "chapter": "what-it-does",
+    "step": 2,
+    "text": "它的核心是一个叫 Qwen3-VL 的视觉模型。你给它一张学生默写的扫描页，它能逐个认出学生手写的汉字，还带上每个字在页面上的坐标。",
+    "audio": "what-it-does/2.mp3"
+  },
+  {
+    "chapter": "the-problem",
+    "step": 1,
+    "text": "听起来很美好对吧。但实际跑起来你会发现一个很尴尬的事。模型认字没问题，坐标全偏了。",
+    "audio": "the-problem/1.mp3"
+  },
+  {
+    "chapter": "the-problem",
+    "step": 2,
+    "text": "我拿到第一版结果的时候，整个批注报告的文字位置整体偏下，每行第一个字还整体偏右。看着就像把字幕放错了位置。",
+    "audio": "the-problem/2.mp3"
+  },
+  {
+    "chapter": "the-problem",
+    "step": 3,
+    "text": "我查了一圈，发现这是 Qwen3-VL 的一个老毛病。它的 Y 坐标有系统性偏移，经常好几道题共用同一个 Y 值。",
+    "audio": "the-problem/3.mp3"
+  },
+  {
+    "chapter": "y-fix",
+    "step": 1,
+    "text": "我的办法是 Y-Clamp。每次识别完，把模型给的 Y 坐标直接替换成手写框的真实 Y 范围。但这里有个细节，如果模型在不同字之间有相对高低差异，我会按比例保留，而不是一刀切。",
+    "audio": "y-fix/1.mp3"
+  },
+  {
+    "chapter": "y-fix",
+    "step": 2,
+    "text": "如果模型在不同字之间有相对高低差异，我会按比例保留，而不是一刀切。",
+    "audio": "y-fix/2.mp3"
+  },
+  {
+    "chapter": "x-fix",
+    "step": 1,
+    "text": "修完 Y 我发现 X 也偏。每行第一个字比实际位置偏右 90 到 130 像素。原因出在一个等宽假设上。我在算答案起始位置时，假设每个字符宽度一样。但题号是 ASCII 的括号加数字，答案才是中文。中文字符实际宽度是 ASCII 的两倍。",
+    "audio": "x-fix/1.mp3"
+  },
+  {
+    "chapter": "x-fix",
+    "step": 2,
+    "text": "修法是用 unicodedata 的 east_asian_width 函数。中文字符权重给 2，ASCII 给 1，按真实宽度比例算位置。改完之后首字位置左移了快 100 像素，正好对齐答案起始处。",
+    "audio": "x-fix/2.mp3"
+  },
+  {
+    "chapter": "polish",
+    "step": 1,
+    "text": "然后是文字偏下的问题。渲染文字时字号有个 24pt 的上限，大框会被截断。但原来的基线公式固定取框底加 20% 高度，框一大文字就挤在下半部分。我把基线公式改成了垂直居中。文字视觉中心严格等于框中心。",
+    "audio": "polish/1.mp3"
+  },
+  {
+    "chapter": "polish",
+    "step": 2,
+    "text": "最后还有一招。Qwen3-VL 原本能输出每个字的识别置信度，但以前我用的是规则估算的假置信度，门控形同虚设。改用模型真实置信度之后，7 个原本被漏掉的存疑字被正确标橙了。",
+    "audio": "polish/2.mp3"
+  },
+  {
+    "chapter": "polish",
+    "step": 3,
+    "text": "门控阈值：green ≥ 0.85 / orange ≥ 0.60 / skip < 0.30。7 个存疑字被救回。",
+    "audio": "polish/3.mp3"
+  },
+  {
+    "chapter": "results",
+    "step": 1,
+    "text": "跑完所有修复，我拿一份真实样本测了一下。62 个字，61 个正确识别，1 个标存疑，0 个错。坐标误差从 144 像素压到 61 像素。",
+    "audio": "results/1.mp3"
+  },
+  {
+    "chapter": "results",
+    "step": 2,
+    "text": "坐标误差从 144 像素压到 61 像素。提升 57%。",
+    "audio": "results/2.mp3"
+  },
+  {
+    "chapter": "results",
+    "step": 3,
+    "text": "这是一份完整的 PDF 批改报告。每一道题、每一个字，颜色标注得清清楚楚。老师只需要扫一眼橙色问号，重点检查那一个字就行。工具已经开源，链接在评论区置顶。",
+    "audio": "results/3.mp3"
+  }
+]

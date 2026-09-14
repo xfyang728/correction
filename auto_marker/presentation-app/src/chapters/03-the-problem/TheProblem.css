@@ -1,0 +1,171 @@
+/* ── Chapter 03 · the-problem ── */
+.tp-scene { font-family: var(--font-display-cn); }
+.tp-em { color: var(--accent); }
+
+/* step 0 — intro */
+.tp-intro {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+}
+.tp-headline {
+  font-size: clamp(64px, 6vw, 96px);
+  color: var(--text);
+  margin: 0;
+  line-height: 1.15;
+}
+.tp-sub {
+  font-size: clamp(28px, 2.6vw, 36px);
+  color: var(--text-mute);
+  margin: 0;
+}
+
+/* step 1 — report with offset annotations */
+.tp-report-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.tp-report {
+  position: relative;
+  flex: 1;
+  background: var(--surface-2);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+  padding: var(--space-7);
+  overflow: hidden;
+}
+.tp-handwriting {
+  position: absolute;
+  inset: var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  opacity: 0.25;
+}
+.tp-hand-line {
+  font-size: 28px;
+  color: var(--text);
+  letter-spacing: 0.1em;
+  font-style: italic;
+}
+.tp-annotations {
+  position: absolute;
+  inset: var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  pointer-events: none;
+}
+.tp-anno-line {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  transform: translate(40px, 40px); /* offset down + right */
+}
+.tp-anno-correct { color: #4ade80; text-shadow: 0 0 8px rgba(74, 222, 128, 0.4); }
+.tp-arrows {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.tp-arrows-label {
+  display: flex;
+  gap: var(--space-7);
+  justify-content: center;
+}
+.tp-arrow-label {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: #f87171;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* step 2 — Y axis diagram */
+.tp-yaxis {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.tp-y-head {
+  font-size: clamp(48px, 4.4vw, 64px);
+  color: var(--text);
+  margin: 0;
+  line-height: 1.2;
+}
+.tp-y-diagram {
+  display: flex;
+  gap: var(--space-7);
+  height: 360px;
+  margin-top: var(--space-5);
+  position: relative;
+}
+.tp-y-axis {
+  width: 60px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border-right: var(--rule-w) var(--rule-style) var(--rule);
+  padding-right: var(--space-3);
+}
+.tp-y-tick {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-mute);
+}
+.tp-y-questions {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.18);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+}
+.tp-y-box {
+  position: absolute;
+  width: 140px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-3);
+  border: 2px solid var(--accent);
+  border-radius: var(--r-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: 0 0 16px var(--accent-glow);
+}
+.tp-y-box-label {
+  font-family: var(--font-display-cn);
+  font-size: 18px;
+  color: var(--text);
+}
+.tp-y-box-val {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+.tp-y-circle {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.tp-circle-anim {
+  stroke-dasharray: 1200;
+  stroke-dashoffset: 1200;
+  animation: tp-circle-draw 1400ms var(--ease-quart) 1200ms forwards;
+}
+@keyframes tp-circle-draw { to { stroke-dashoffset: 0; } }
+.tp-y-foot {
+  font-size: clamp(24px, 2.2vw, 32px);
+  color: var(--text-2);
+  margin: var(--space-4) 0 0;
+}

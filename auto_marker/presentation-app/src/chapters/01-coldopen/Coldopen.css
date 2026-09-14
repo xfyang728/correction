@@ -1,0 +1,130 @@
+/* ── Chapter 01 · coldopen ── */
+.co-scene {
+  font-family: var(--font-display-cn);
+}
+
+/* step 0 — hero 40 本 */
+.co-cover {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+.co-hero-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  line-height: 0.85;
+}
+.co-hero-num {
+  font-size: clamp(280px, 22vw, 360px);
+  color: var(--accent);
+  text-shadow:
+    0 0 30px var(--accent-glow),
+    0 2px 0 rgba(255, 255, 255, 0.08);
+}
+.co-hero-unit {
+  font-family: var(--font-display-cn);
+  font-size: clamp(96px, 8vw, 128px);
+  color: var(--text);
+  font-weight: 700;
+}
+.co-question {
+  font-size: clamp(40px, 4vw, 56px);
+  color: var(--text-2);
+  margin: var(--space-4) 0 0;
+  letter-spacing: 0.04em;
+}
+.co-cue {
+  margin-top: var(--space-7);
+}
+
+/* step 1 — 1 小时起步 + strike */
+.co-answer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: var(--space-5);
+  position: relative;
+}
+.co-answer-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  position: relative;
+}
+.co-answer-num {
+  font-size: clamp(280px, 22vw, 360px);
+  color: var(--accent);
+  text-shadow: 0 0 30px var(--accent-glow);
+  line-height: 0.9;
+}
+.co-answer-unit {
+  font-size: clamp(72px, 6vw, 96px);
+  color: var(--text);
+}
+.co-em { color: var(--accent); }
+.co-strike {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 60px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.co-strike-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: co-strike-draw 1100ms var(--ease-quart) 500ms forwards;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+@keyframes co-strike-draw {
+  to { stroke-dashoffset: 0; }
+}
+.co-answer-foot {
+  font-size: clamp(28px, 2.6vw, 36px);
+  color: var(--text-mute);
+  margin-top: var(--space-4);
+}
+
+/* step 2 — repeated chalk lines */
+.co-repeat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-7);
+}
+.co-chalkboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-7) var(--space-9);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+  background: rgba(0, 0, 0, 0.18);
+  min-width: 720px;
+}
+.co-chalk-line {
+  font-family: var(--font-display-cn);
+  font-size: clamp(36px, 3.4vw, 48px);
+  color: var(--text);
+  letter-spacing: 0.08em;
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 8px rgba(255, 255, 255, 0.08);
+}
+.co-repeat-foot {
+  font-size: clamp(36px, 3.4vw, 48px);
+  color: var(--text-2);
+}

@@ -1,0 +1,199 @@
+/* ── Chapter 02 · what-it-does ── */
+.wd-scene {
+  font-family: var(--font-display-cn);
+}
+
+/* step 0 — pipeline */
+.wd-pipeline {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-7);
+}
+.wd-flow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-7);
+  padding: var(--space-7) 0;
+}
+.wd-card {
+  background: var(--surface-2);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+  padding: var(--space-5);
+  position: relative;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* PDF input */
+.wd-pdf { width: 220px; }
+.wd-pdf-page {
+  width: 130px;
+  height: 170px;
+  background: var(--surface-3);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-xs);
+  position: relative;
+}
+.wd-pdf-page::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  background: repeating-linear-gradient(
+    var(--rule-style),
+    transparent 0,
+    transparent 12px,
+    rgba(255, 255, 255, 0.08) 12px,
+    rgba(255, 255, 255, 0.08) 14px
+  );
+}
+.wd-pdf-page-2 {
+  position: absolute;
+  top: 28px;
+  left: 50%;
+  transform: translateX(-50%) rotate(4deg);
+  opacity: 0.5;
+}
+.wd-pdf-label { margin-top: var(--space-4); }
+
+/* bridge */
+.wd-bridge {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 320px;
+}
+.wd-progress-wrap {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.wd-progress-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--surface-3);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  position: relative;
+}
+.wd-progress-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-glow));
+  border-radius: var(--r-pill);
+  transform-origin: left;
+  animation: wd-fill 2000ms var(--ease-quart) 600ms forwards;
+  transform: scaleX(0);
+}
+@keyframes wd-fill { to { transform: scaleX(1); } }
+.wd-progress-text { color: var(--accent); }
+.wd-arrow {
+  width: 80px;
+  height: 24px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+
+/* output report */
+.wd-report { width: 280px; }
+.wd-report-line {
+  display: flex;
+  gap: 6px;
+  margin: var(--space-2) 0;
+}
+.wd-ch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-xs);
+  font-size: 18px;
+  font-family: var(--font-display-cn);
+  font-weight: 700;
+}
+.wd-ch-correct { color: #4ade80; border: 2px solid #4ade80; }
+.wd-ch-wrong   { color: #f87171; border: 2px solid #f87171; }
+.wd-ch-uncertain { color: #fb923c; border: 2px solid #fb923c; }
+.wd-report-label { margin-top: var(--space-3); }
+
+.wd-legend {
+  display: flex;
+  gap: var(--space-5);
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+.wd-leg { display: inline-flex; align-items: center; gap: 8px; color: var(--text-mute); }
+.wd-leg::before {
+  content: "";
+  width: 10px; height: 10px; border-radius: 50%;
+  display: inline-block;
+}
+.wd-leg-correct::before { background: #4ade80; }
+.wd-leg-wrong::before { background: #f87171; }
+.wd-leg-uncertain::before { background: #fb923c; }
+
+/* step 1 — engine + abilities */
+.wd-engine {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+}
+.wd-model-name {
+  font-size: clamp(96px, 9vw, 144px);
+  margin: var(--space-3) 0 0;
+  line-height: 0.95;
+}
+.wd-em { color: var(--accent); text-shadow: 0 0 24px var(--accent-glow); }
+.wd-model-sub {
+  font-size: clamp(24px, 2.2vw, 32px);
+  color: var(--text-2);
+  margin: 0;
+}
+.wd-abilities {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
+  margin-top: var(--space-7);
+}
+.wd-ability {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  min-height: 120px;
+}
+.wd-ability-num {
+  font-size: 64px;
+  color: var(--accent);
+  line-height: 0.9;
+  text-shadow: 0 0 12px var(--accent-glow);
+}
+.wd-ability-title {
+  font-size: 26px;
+  color: var(--text);
+  margin: 0 0 var(--space-2);
+}
+.wd-ability-desc {
+  font-size: 12px;
+  color: var(--text-mute);
+  line-height: 1.5;
+}

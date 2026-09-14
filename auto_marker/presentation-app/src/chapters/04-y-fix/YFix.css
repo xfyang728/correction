@@ -1,0 +1,188 @@
+/* ── Chapter 04 · y-fix ── */
+.yf-scene { font-family: var(--font-display-cn); }
+.yf-em { color: var(--accent); }
+
+/* step 0 — before/after diagram */
+.yf-intro {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-7);
+}
+.yf-name {
+  font-size: clamp(72px, 6.6vw, 104px);
+  color: var(--text);
+  margin: 0;
+  line-height: 1;
+}
+.yf-em { text-shadow: 0 0 24px var(--accent-glow); }
+.yf-tagline {
+  font-size: clamp(24px, 2.2vw, 32px);
+  color: var(--text-2);
+  margin: 0;
+}
+
+.yf-diagram {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: var(--space-7);
+  align-items: center;
+}
+.yf-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: 100%;
+}
+.yf-frame {
+  position: relative;
+  flex: 1;
+  height: 360px;
+  background: var(--surface-2);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+}
+.yf-box {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 140px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--r-xs);
+  font-size: 18px;
+  text-align: center;
+  font-weight: 700;
+}
+.yf-box-wrong {
+  background: rgba(248, 113, 113, 0.1);
+  border: 2px solid #f87171;
+  color: #f87171;
+  transition: top 900ms var(--ease-quart);
+}
+.yf-box-right {
+  background: rgba(74, 222, 128, 0.1);
+  border: 2px solid #4ade80;
+  color: #4ade80;
+  box-shadow: 0 0 12px rgba(74, 222, 128, 0.3);
+}
+
+.yf-bridge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 200px;
+}
+.yf-fn {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--accent);
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+.yf-arrow {
+  width: 80px;
+  height: 24px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+.yf-snap {
+  font-family: var(--font-display-cn);
+  font-size: 36px;
+  color: var(--accent);
+  font-weight: 700;
+  text-shadow: 0 0 16px var(--accent-glow);
+  animation: yf-pop 600ms var(--ease-overshoot) 1000ms both;
+}
+@keyframes yf-pop {
+  0%   { transform: scale(0) rotate(-12deg); opacity: 0; }
+  60%  { transform: scale(1.2) rotate(4deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+/* step 1 — zoom into relative Y diff */
+.yf-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.yf-detail-head {
+  font-size: clamp(48px, 4.4vw, 64px);
+  color: var(--text);
+  margin: 0;
+  line-height: 1.2;
+}
+.yf-zoom {
+  margin-top: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.yf-zoom-frame {
+  display: grid;
+  grid-template-columns: 1fr 60px 1fr;
+  gap: var(--space-4);
+  height: 320px;
+  align-items: stretch;
+}
+.yf-zoom-region,
+.yf-zoom-model,
+.yf-zoom-clamped {
+  position: relative;
+  background: var(--surface-2);
+  border: var(--rule-w) var(--rule-style) var(--rule);
+  border-radius: var(--r-card);
+}
+.yf-zoom-region {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.yf-zoom-line {
+  width: 80%;
+  height: 6px;
+  background: var(--text-mute);
+  border-radius: var(--r-pill);
+  opacity: 0.4;
+  border: var(--rule-w) var(--rule-style) var(--rule);
+}
+.yf-zoom-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
+  color: var(--accent);
+  text-shadow: 0 0 12px var(--accent-glow);
+}
+.yf-zoom-ch {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.yf-zoom-char {
+  font-size: 64px;
+  color: var(--accent);
+  font-weight: 700;
+  text-shadow: 0 0 12px var(--accent-glow);
+}
+.yf-zoom-val {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-mute);
+}
+.yf-zoom-foot {
+  font-size: clamp(24px, 2.2vw, 32px);
+  color: var(--text-2);
+  margin: var(--space-4) 0 0;
+  text-align: center;
+}
